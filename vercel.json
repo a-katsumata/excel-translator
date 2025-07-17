@@ -1,0 +1,25 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "app.py",
+      "use": "@vercel/python"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "app.py"
+    }
+  ],
+  "env": {
+    "DEEPL_API_KEY": "@deepl_api_key",
+    "SECRET_KEY": "@secret_key",
+    "FLASK_ENV": "production"
+  },
+  "functions": {
+    "app.py": {
+      "maxDuration": 60
+    }
+  }
+}
