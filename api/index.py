@@ -1,104 +1,123 @@
-from flask import Flask, render_template, request, jsonify, send_file, flash, redirect, url_for
+from flask import Flask, render_template, request, jsonify
 import os
-import io
 import sys
-import base64
+import logging
 from werkzeug.utils import secure_filename
 
 # パスを追加してモジュールをインポート
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from excel_translator import ExcelTranslator
+from utils.validators import ValidationError, validate_file_upload, validate_translation_params, validate_environment
+from utils.response_helpers import (
+    create_error_response, create_success_response, create_translation_result_response,
+    create_health_response, log_request_info, handle_exception
+)
+
+# ログ設定
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__, template_folder='../templates')
-app.secret_key = os.environ.get('SECRET_KEY', 'your-secret-key-here')
+app.secret_key = os.environ.get('SECRET_KEY', 'excel-translator-secret-key')
 
 # 設定
 ALLOWED_EXTENSIONS = {'xlsx', 'xls'}
 MAX_CONTENT_LENGTH = 16 * 1024 * 1024  # 16MB
 
-# DeepL APIキー（環境変数から取得）
-DEEPL_API_KEY = os.environ.get('DEEPL_API_KEY')
+# 環境変数の検証
+try:
+    env_vars = validate_environment()
+    DEEPL_API_KEY = env_vars['DEEPL_API_KEY']
+    logger.info("Environment validation passed")
+except ValidationError as e:
+    logger.error(f"Environment validation failed: {e}")
+    raise
 
-if not DEEPL_API_KEY:
-    raise ValueError("DEEPL_API_KEY環境変数が設定されていません")
-
-def allowed_file(filename):
+def create_translator() -> ExcelTranslator:
     """
-    アップロードされたファイルが許可された拡張子かチェック
+    翻訳インスタンスを作成
+    
+    Returns:
+        ExcelTranslator: 翻訳インスタンス
     """
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+    return ExcelTranslator(DEEPL_API_KEY)
 
 @app.route('/')
 def index():
     """
     メインページ - ファイルアップロード画面
     """
-    return render_template('index.html')
+    try:
+        log_request_info(request, 'index')
+        return render_template('index.html')
+    except Exception as e:
+        return handle_exception(e, 'index')
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
     """
     ファイルアップロード処理
     """
-    if 'file' not in request.files:
-        return jsonify({'error': 'ファイルが選択されていません。'}), 400
-    
-    file = request.files['file']
-    context = request.form.get('context', '')
-    source_lang = request.form.get('source_lang', 'JA')
-    target_lang = request.form.get('target_lang', 'EN-US')
-    
-    if file.filename == '':
-        return jsonify({'error': 'ファイルが選択されていません。'}), 400
-    
-    if file and allowed_file(file.filename):
-        try:
-            # ファイルデータを読み込み
-            file_data = file.read()
-            
-            # 翻訳処理
-            translator = ExcelTranslator(DEEPL_API_KEY)
-            
-            # APIキーの有効性を確認
-            if not translator.validate_api_key():
-                return jsonify({'error': 'DeepL APIキーが無効です。'}), 500
-            
-            # 翻訳実行
-            translated_data = translator.translate_excel_file(
-                file_data=file_data,
-                context=context,
-                source_lang=source_lang,
-                target_lang=target_lang
-            )
-            
-            # 翻訳後のファイル名を生成
-            original_filename = secure_filename(file.filename)
-            name, ext = os.path.splitext(original_filename)
-            translated_filename = f"{name}_translated{ext}"
-            
-            # Base64エンコードしてテンプレートに渡す
-            encoded_data = base64.b64encode(translated_data).decode('utf-8')
-            
-            return render_template('result.html', 
-                                     original_filename=original_filename,
-                                     translated_filename=translated_filename,
-                                     context=context,
-                                     source_lang=source_lang,
-                                     target_lang=target_lang,
-                                     file_data=encoded_data)
-            
-        except Exception as e:
-            return jsonify({'error': f'翻訳処理中にエラーが発生しました: {str(e)}'}), 500
-    
-    else:
-        return jsonify({'error': '許可されていないファイル形式です。'}), 400
+    try:
+        log_request_info(request, 'upload')
+        
+        # ファイルの取得
+        file = request.files.get('file')
+        context = request.form.get('context', '')
+        source_lang = request.form.get('source_lang', 'JA')
+        target_lang = request.form.get('target_lang', 'EN-US')
+        
+        # バリデーション
+        validate_file_upload(file, ALLOWED_EXTENSIONS, MAX_CONTENT_LENGTH)
+        source_lang, target_lang, context = validate_translation_params(source_lang, target_lang, context)
+        
+        # ファイルデータを読み込み
+        file_data = file.read()
+        
+        # 翻訳処理
+        translator = create_translator()
+        
+        # APIキーの有効性を確認
+        if not translator.validate_api_key():
+            return create_error_response('DeepL APIキーが無効です。', 401)
+        
+        # 翻訳実行
+        translated_data = translator.translate_excel_file(
+            file_data=file_data,
+            context=context,
+            source_lang=source_lang,
+            target_lang=target_lang
+        )
+        
+        # 翻訳後のファイル名を生成
+        original_filename = secure_filename(file.filename)
+        name, ext = os.path.splitext(original_filename)
+        translated_filename = f"{name}_translated{ext}"
+        
+        return create_translation_result_response(
+            original_filename=original_filename,
+            translated_filename=translated_filename,
+            translated_data=translated_data,
+            context=context,
+            source_lang=source_lang,
+            target_lang=target_lang,
+            format_type="html"
+        )
+        
+    except ValidationError as e:
+        return create_error_response(str(e), 400)
+    except Exception as e:
+        return handle_exception(e, 'upload')
 
 @app.route('/health')
 def health_check():
     """
     ヘルスチェック用エンドポイント
     """
-    return jsonify({'status': 'healthy', 'service': 'excel-translator'})
+    try:
+        return create_health_response()
+    except Exception as e:
+        return handle_exception(e, 'health')
 
 @app.route('/api/translate', methods=['POST'])
 def api_translate():
@@ -106,25 +125,26 @@ def api_translate():
     API形式での翻訳処理
     """
     try:
-        if 'file' not in request.files:
-            return jsonify({'error': 'ファイルが選択されていません。'}), 400
+        log_request_info(request, 'api_translate')
         
-        file = request.files['file']
+        # ファイルの取得
+        file = request.files.get('file')
         context = request.form.get('context', '')
         source_lang = request.form.get('source_lang', 'JA')
         target_lang = request.form.get('target_lang', 'EN-US')
         
-        if not allowed_file(file.filename):
-            return jsonify({'error': '許可されていないファイル形式です。'}), 400
+        # バリデーション
+        validate_file_upload(file, ALLOWED_EXTENSIONS, MAX_CONTENT_LENGTH)
+        source_lang, target_lang, context = validate_translation_params(source_lang, target_lang, context)
         
         # ファイルデータを読み込み
         file_data = file.read()
         
         # 翻訳処理
-        translator = ExcelTranslator(DEEPL_API_KEY)
+        translator = create_translator()
         
         if not translator.validate_api_key():
-            return jsonify({'error': 'DeepL APIキーが無効です。'}), 500
+            return create_error_response('DeepL APIキーが無効です。', 401)
         
         translated_data = translator.translate_excel_file(
             file_data=file_data,
@@ -133,18 +153,25 @@ def api_translate():
             target_lang=target_lang
         )
         
-        # Base64エンコードして返す
-        encoded_data = base64.b64encode(translated_data).decode('utf-8')
+        # 翻訳後のファイル名を生成
+        original_filename = secure_filename(file.filename)
+        name, ext = os.path.splitext(original_filename)
+        translated_filename = f"{name}_translated{ext}"
         
-        return jsonify({
-            'success': True,
-            'translated_file': encoded_data,
-            'original_filename': file.filename,
-            'context': context
-        })
+        return create_translation_result_response(
+            original_filename=original_filename,
+            translated_filename=translated_filename,
+            translated_data=translated_data,
+            context=context,
+            source_lang=source_lang,
+            target_lang=target_lang,
+            format_type="json"
+        )
         
+    except ValidationError as e:
+        return create_error_response(str(e), 400)
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return handle_exception(e, 'api_translate')
 
 # Vercel用のハンドラー
 def handler(request):

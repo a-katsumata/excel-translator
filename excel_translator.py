@@ -2,7 +2,12 @@ import openpyxl
 import deepl
 import os
 import io
+import logging
 from typing import Dict, Any, List, Optional
+from functools import lru_cache
+
+# ログ設定
+logger = logging.getLogger(__name__)
 
 class ExcelTranslator:
     """
@@ -19,7 +24,9 @@ class ExcelTranslator:
         """
         self.deepl_api_key = deepl_api_key
         self.translator = deepl.Translator(deepl_api_key)
+        logger.info("ExcelTranslator initialized")
         
+    @lru_cache(maxsize=32)
     def get_context_replacements(self, context: str) -> Dict[str, str]:
         """
         文脈に応じた前処理置換ルールを取得
@@ -141,17 +148,19 @@ class ExcelTranslator:
             翻訳後のExcelファイルバイトデータ
         """
         try:
+            logger.info(f"Starting translation: {source_lang} -> {target_lang}, context: {context}")
+            
             # バイトデータからワークブックを読み込み
             workbook = openpyxl.load_workbook(io.BytesIO(file_data))
             
             # 文脈に応じた前処理ルールを取得
             replacements = self.get_context_replacements(context)
             
-            # 翻訳のcontextメッセージを設定
-            translation_context = self._get_translation_context(context)
+            total_cells_translated = 0
             
             for sheet_name in workbook.sheetnames:
                 sheet = workbook[sheet_name]
+                logger.info(f"Processing sheet: {sheet_name}")
                 
                 # 翻訳対象のセルとテキストを収集
                 cells_to_translate = []
@@ -169,16 +178,27 @@ class ExcelTranslator:
                 
                 # 翻訳対象がある場合のみ翻訳実行
                 if texts_to_translate:
-                    # DeepL APIで翻訳
-                    results = self.translator.translate_text(
-                        texts_to_translate,
-                        source_lang=source_lang,
-                        target_lang=target_lang
-                    )
+                    logger.info(f"Translating {len(texts_to_translate)} cells in sheet {sheet_name}")
                     
-                    # 翻訳結果をセルに書き戻し
-                    for cell, result in zip(cells_to_translate, results):
-                        cell.value = result.text
+                    # バッチサイズを制限して処理
+                    batch_size = 50
+                    for i in range(0, len(texts_to_translate), batch_size):
+                        batch_texts = texts_to_translate[i:i + batch_size]
+                        batch_cells = cells_to_translate[i:i + batch_size]
+                        
+                        # DeepL APIで翻訳
+                        results = self.translator.translate_text(
+                            batch_texts,
+                            source_lang=source_lang,
+                            target_lang=target_lang
+                        )
+                        
+                        # 翻訳結果をセルに書き戻し
+                        for cell, result in zip(batch_cells, results):
+                            cell.value = result.text
+                            total_cells_translated += 1
+            
+            logger.info(f"Translation completed: {total_cells_translated} cells translated")
             
             # 翻訳後のファイルをバイトデータとして返す
             output = io.BytesIO()
@@ -186,7 +206,14 @@ class ExcelTranslator:
             output.seek(0)
             return output.read()
             
+        except deepl.exceptions.AuthorizationError:
+            logger.error("DeepL API authorization error")
+            raise Exception("DeepL APIキーが無効です。")
+        except deepl.exceptions.QuotaExceededException:
+            logger.error("DeepL API quota exceeded")
+            raise Exception("DeepL APIの使用制限に達しました。")
         except Exception as e:
+            logger.error(f"Translation error: {str(e)}")
             raise Exception(f"翻訳処理中にエラーが発生しました: {str(e)}")
     
     def _get_translation_context(self, context: str) -> str:
@@ -224,9 +251,12 @@ class ExcelTranslator:
         """
         try:
             # 簡単なテスト翻訳を実行
-            self.translator.translate_text("テスト", source_lang="JA", target_lang="EN-US")
+            result = self.translator.translate_text("テスト", source_lang="JA", target_lang="EN-US")
+            logger.info(f"API key validation successful: {result.text}")
             return True
         except deepl.exceptions.AuthorizationError:
+            logger.error("API key validation failed: Authorization error")
             return False
-        except Exception:
+        except Exception as e:
+            logger.error(f"API key validation failed: {str(e)}")
             return False
