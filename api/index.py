@@ -646,52 +646,108 @@ class UnifiedWorkbook:
             self._save_xls_with_translation(file_path)
     
     def _save_xls_with_translation(self, file_path):
-        """XLSファイルを翻訳データと共に保存（シンプルな方法）"""
+        """XLSファイルを翻訳データと共に保存（書式・図形保持）"""
         try:
             print(f"DEBUG: Starting XLS save with {len(self.translated_data)} translations")
             
-            # 新しいワークブックを作成（書式エラー回避）
-            self.write_workbook = xlwt.Workbook()
-            print("DEBUG: New workbook created")
-            
-            # 各シートをコピー
-            for sheet_name in self.sheetnames:
-                sheet_index = self.sheetnames.index(sheet_name)
-                original_sheet = self.workbook.sheet_by_index(sheet_index)
-                write_sheet = self.write_workbook.add_sheet(sheet_name)
-                print(f"DEBUG: Processing sheet {sheet_name} (index {sheet_index})")
+            # まず xlutils.copy を試行（書式・図形保持）
+            try:
+                self.write_workbook = xlutils_copy(self.workbook)
+                print("DEBUG: xlutils copy completed successfully")
                 
-                # 元のデータと翻訳データを書き込み
-                translations_applied = 0
-                for row in range(original_sheet.nrows):
-                    for col in range(original_sheet.ncols):
-                        cell_key = f"{sheet_name}_{row + 1}_{col + 1}"
-                        
-                        # 翻訳データがある場合は翻訳データを使用
-                        if cell_key in self.translated_data:
-                            translated_value = self.translated_data[cell_key]
-                            try:
-                                if translated_value is not None:
-                                    write_sheet.write(row, col, str(translated_value))
-                                    translations_applied += 1
-                            except Exception as e:
-                                print(f"Error writing translated value to cell {cell_key}: {e}")
-                        else:
-                            # 翻訳データがない場合は元のデータを使用
-                            try:
-                                original_value = original_sheet.cell_value(row, col)
-                                if original_value is not None and original_value != "":
-                                    write_sheet.write(row, col, original_value)
-                            except Exception as e:
-                                print(f"Error writing original value to cell ({row}, {col}): {e}")
+                # 翻訳されたデータを書き込み
+                for sheet_name in self.sheetnames:
+                    sheet_index = self.sheetnames.index(sheet_name)
+                    write_sheet = self.write_workbook.get_sheet(sheet_index)
+                    print(f"DEBUG: Processing sheet {sheet_name} (index {sheet_index})")
+                    
+                    # 翻訳データを適用
+                    translations_applied = 0
+                    for cell_key, translated_value in self.translated_data.items():
+                        if cell_key.startswith(f"{sheet_name}_"):
+                            parts = cell_key.split('_')
+                            if len(parts) >= 3:
+                                row = int(parts[-2]) - 1  # 0ベースに変換
+                                col = int(parts[-1]) - 1  # 0ベースに変換
+                                
+                                try:
+                                    if translated_value is not None:
+                                        # 翻訳データを慎重に書き込み（書式なしで）
+                                        # xlwtのdefaultスタイルを使用してNumberFormatエラーを回避
+                                        write_sheet.write(row, col, str(translated_value), xlwt.Style.default_style)
+                                        translations_applied += 1
+                                except Exception as cell_error:
+                                    print(f"Error writing cell {cell_key}: {cell_error}")
+                                    # 更にシンプルな方法を試行
+                                    try:
+                                        write_sheet.write(row, col, str(translated_value))
+                                        translations_applied += 1
+                                    except:
+                                        print(f"Failed to write cell {cell_key} completely")
+                                        continue
+                    
+                    print(f"DEBUG: Applied {translations_applied} translations to sheet {sheet_name}")
                 
-                print(f"DEBUG: Applied {translations_applied} translations to sheet {sheet_name}")
-            
-            # ファイルを保存
-            print(f"DEBUG: Saving file to {file_path}")
-            self.write_workbook.save(file_path)
-            print("DEBUG: XLS file saved successfully")
-            
+                # ファイルを保存
+                print(f"DEBUG: Saving file to {file_path}")
+                try:
+                    self.write_workbook.save(file_path)
+                    print("DEBUG: XLS file saved successfully with formatting preserved")
+                except Exception as save_error:
+                    print(f"ERROR during save: {save_error}")
+                    # 保存エラーの場合は例外を上位に投げる
+                    raise save_error
+                
+            except Exception as xlutils_error:
+                error_msg = str(xlutils_error)
+                print(f"WARNING: xlutils copy failed ({error_msg}), falling back to simple method")
+                
+                # NumberFormatエラーの場合は特別な処理
+                if "NumberFormat" in error_msg or "decode" in error_msg or "NoneType" in error_msg:
+                    print("DEBUG: Detected NumberFormat/encoding error, using simple fallback")
+                
+                # フォールバック: シンプルな方法（書式なし）
+                self.write_workbook = xlwt.Workbook()
+                print("DEBUG: Created new workbook as fallback")
+                
+                # 各シートをコピー
+                for sheet_name in self.sheetnames:
+                    sheet_index = self.sheetnames.index(sheet_name)
+                    original_sheet = self.workbook.sheet_by_index(sheet_index)
+                    write_sheet = self.write_workbook.add_sheet(sheet_name)
+                    print(f"DEBUG: Processing sheet {sheet_name} (index {sheet_index}) in fallback mode")
+                    
+                    # 元のデータと翻訳データを書き込み
+                    translations_applied = 0
+                    for row in range(original_sheet.nrows):
+                        for col in range(original_sheet.ncols):
+                            cell_key = f"{sheet_name}_{row + 1}_{col + 1}"
+                            
+                            # 翻訳データがある場合は翻訳データを使用
+                            if cell_key in self.translated_data:
+                                translated_value = self.translated_data[cell_key]
+                                try:
+                                    if translated_value is not None:
+                                        write_sheet.write(row, col, str(translated_value))
+                                        translations_applied += 1
+                                except Exception as e:
+                                    print(f"Error writing translated value to cell {cell_key}: {e}")
+                            else:
+                                # 翻訳データがない場合は元のデータを使用
+                                try:
+                                    original_value = original_sheet.cell_value(row, col)
+                                    if original_value is not None and original_value != "":
+                                        write_sheet.write(row, col, original_value)
+                                except Exception as e:
+                                    print(f"Error writing original value to cell ({row}, {col}): {e}")
+                    
+                    print(f"DEBUG: Applied {translations_applied} translations to sheet {sheet_name} in fallback mode")
+                
+                # ファイルを保存
+                print(f"DEBUG: Saving file to {file_path}")
+                self.write_workbook.save(file_path)
+                print("DEBUG: XLS file saved successfully (fallback mode - formatting may be lost)")
+                
         except Exception as e:
             print(f"ERROR in _save_xls_with_translation: {e}")
             import traceback
