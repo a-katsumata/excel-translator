@@ -4,6 +4,7 @@ import sys
 import openpyxl
 import xlrd
 import xlwt
+from xlutils.copy import copy as xlutils_copy
 import requests
 import io
 import tempfile
@@ -525,6 +526,7 @@ class UnifiedWorkbook:
         self.file_format = file_format
         self.original_filename = None
         self.translated_data = {}  # 翻訳データを保存
+        self.original_file_data = file_data.getvalue()  # 元のファイルデータを保存
         
         if file_format == 'xlsx':
             self.workbook = openpyxl.load_workbook(file_data)
@@ -532,6 +534,8 @@ class UnifiedWorkbook:
         elif file_format == 'xls':
             self.workbook = xlrd.open_workbook(file_contents=file_data.read(), formatting_info=True)
             self.sheetnames = self.workbook.sheet_names()
+            # XLSファイルの書き込み用ワークブックを作成
+            self.write_workbook = None
         else:
             raise ValueError(f"Unsupported file format: {file_format}")
     
@@ -544,133 +548,96 @@ class UnifiedWorkbook:
             return UnifiedWorksheet(self.workbook.sheet_by_index(sheet_index), 'xls', self)
     
     def save(self, file_path):
-        """ファイルを保存（XLSX形式で統一）"""
+        """ファイルを保存（元の形式を保持）"""
         if self.file_format == 'xlsx':
             self.workbook.save(file_path)
         elif self.file_format == 'xls':
-            # XLSの場合はXLSX形式で保存（フォーマット保持）
-            new_workbook = openpyxl.Workbook()
-            new_workbook.remove(new_workbook.active)  # デフォルトシートを削除
+            # XLSファイルを元の形式で保存（完全な形式保持）
+            self._save_xls_with_translation(file_path)
+    
+    def _save_xls_with_translation(self, file_path):
+        """XLSファイルを翻訳データと共に保存"""
+        # xlutilsを使用して元のワークブックをコピー（すべての書式・図形を保持）
+        self.write_workbook = xlutils_copy(self.workbook)
+        
+        # 列幅と行高さの設定を保持
+        self._preserve_column_row_dimensions()
+        
+        # 翻訳されたデータを書き込み
+        for sheet_name in self.sheetnames:
+            sheet_index = self.sheetnames.index(sheet_name)
+            write_sheet = self.write_workbook.get_sheet(sheet_index)
+            original_sheet = self.workbook.sheet_by_index(sheet_index)
             
-            for sheet_name in self.sheetnames:
-                old_sheet = self.workbook.sheet_by_name(sheet_name)
-                new_sheet = new_workbook.create_sheet(title=sheet_name)
-                
-                # セルデータとフォーマットをコピー
-                for row in range(old_sheet.nrows):
-                    for col in range(old_sheet.ncols):
-                        # 翻訳された値があればそれを使用、なければ元の値
-                        cell_key = f"{sheet_name}_{row+1}_{col+1}"
-                        if cell_key in self.translated_data:
-                            cell_value = self.translated_data[cell_key]
-                        else:
-                            cell_value = old_sheet.cell_value(row, col)
+            # 翻訳データを適用
+            for cell_key, translated_value in self.translated_data.items():
+                if cell_key.startswith(f"{sheet_name}_"):
+                    parts = cell_key.split('_')
+                    if len(parts) >= 3:
+                        row = int(parts[-2]) - 1  # 0ベースに変換
+                        col = int(parts[-1]) - 1  # 0ベースに変換
                         
-                        if cell_value is not None and cell_value != '':
-                            new_cell = new_sheet.cell(row=row+1, column=col+1, value=cell_value)
+                        try:
+                            # 元のセルの書式情報を取得
+                            original_xf_index = original_sheet.cell_xf_index(row, col)
                             
-                            # フォーマット情報を取得して適用
+                            # 翻訳された値を元の書式で書き込み
+                            write_sheet.write(row, col, translated_value)
+                            
+                            # 書式を維持するために、元の書式情報を再適用
+                            if hasattr(write_sheet, '_Worksheet__rows'):
+                                if row in write_sheet._Worksheet__rows:
+                                    if col in write_sheet._Worksheet__rows[row]:
+                                        write_sheet._Worksheet__rows[row][col].xf_idx = original_xf_index
+                            
+                        except Exception as e:
+                            print(f"Error writing translated value to cell {cell_key}: {e}")
+                            # エラーが発生した場合も、値だけは書き込む
                             try:
-                                xf_index = old_sheet.cell_xf_index(row, col)
-                                book_format_map = self.workbook.format_map
-                                
-                                if xf_index in book_format_map:
-                                    format_info = book_format_map[xf_index]
-                                    
-                                    # フォント情報を適用
-                                    if format_info.font_index < len(self.workbook.font_list):
-                                        font_info = self.workbook.font_list[format_info.font_index]
-                                        
-                                        # フォント設定の複合適用
-                                        font_kwargs = {}
-                                        if font_info.bold:
-                                            font_kwargs['bold'] = True
-                                        if font_info.italic:
-                                            font_kwargs['italic'] = True
-                                        if hasattr(font_info, 'struck_out') and font_info.struck_out:
-                                            font_kwargs['strike'] = True
-                                        if hasattr(font_info, 'underline_type') and font_info.underline_type:
-                                            font_kwargs['underline'] = 'single'
-                                        
-                                        # フォント名とサイズ
-                                        if hasattr(font_info, 'name') and font_info.name:
-                                            font_kwargs['name'] = font_info.name
-                                        if hasattr(font_info, 'height') and font_info.height:
-                                            font_kwargs['size'] = font_info.height // 20  # twipsからポイントに変換
-                                        
-                                        if font_kwargs:
-                                            new_cell.font = openpyxl.styles.Font(**font_kwargs)
-                                    
-                                    # 背景色設定
-                                    if hasattr(format_info, 'background') and format_info.background:
-                                        pattern_info = format_info.background
-                                        if hasattr(pattern_info, 'pattern_colour_index') and pattern_info.pattern_colour_index != 64:
-                                            # 基本的な背景色設定
-                                            try:
-                                                if pattern_info.pattern_colour_index < len(self.workbook.colour_map):
-                                                    color_rgb = self.workbook.colour_map[pattern_info.pattern_colour_index]
-                                                    if color_rgb:
-                                                        hex_color = f"{color_rgb[0]:02X}{color_rgb[1]:02X}{color_rgb[2]:02X}"
-                                                        new_cell.fill = openpyxl.styles.PatternFill(start_color=hex_color, end_color=hex_color, fill_type='solid')
-                                            except:
-                                                pass
-                                    
-                                    # 罫線設定
-                                    if hasattr(format_info, 'border'):
-                                        border_info = format_info.border
-                                        border_kwargs = {}
-                                        
-                                        # 各辺の罫線設定
-                                        if hasattr(border_info, 'left_line_style') and border_info.left_line_style:
-                                            border_kwargs['left'] = openpyxl.styles.Side(style='thin')
-                                        if hasattr(border_info, 'right_line_style') and border_info.right_line_style:
-                                            border_kwargs['right'] = openpyxl.styles.Side(style='thin')
-                                        if hasattr(border_info, 'top_line_style') and border_info.top_line_style:
-                                            border_kwargs['top'] = openpyxl.styles.Side(style='thin')
-                                        if hasattr(border_info, 'bottom_line_style') and border_info.bottom_line_style:
-                                            border_kwargs['bottom'] = openpyxl.styles.Side(style='thin')
-                                        
-                                        if border_kwargs:
-                                            new_cell.border = openpyxl.styles.Border(**border_kwargs)
-                                    
-                                    # 配置設定
-                                    if hasattr(format_info, 'alignment'):
-                                        alignment_info = format_info.alignment
-                                        alignment_kwargs = {}
-                                        
-                                        # 水平配置
-                                        if hasattr(alignment_info, 'hor_align'):
-                                            hor_align_map = {0: 'general', 1: 'left', 2: 'center', 3: 'right', 4: 'fill', 5: 'justify'}
-                                            if alignment_info.hor_align in hor_align_map:
-                                                alignment_kwargs['horizontal'] = hor_align_map[alignment_info.hor_align]
-                                        
-                                        # 垂直配置
-                                        if hasattr(alignment_info, 'vert_align'):
-                                            vert_align_map = {0: 'top', 1: 'center', 2: 'bottom', 3: 'justify'}
-                                            if alignment_info.vert_align in vert_align_map:
-                                                alignment_kwargs['vertical'] = vert_align_map[alignment_info.vert_align]
-                                        
-                                        if alignment_kwargs:
-                                            new_cell.alignment = openpyxl.styles.Alignment(**alignment_kwargs)
-                                            
-                            except (AttributeError, IndexError, KeyError):
-                                # フォーマット情報の取得に失敗した場合はスキップ
+                                write_sheet.write(row, col, translated_value)
+                            except:
+                                pass
+        
+        # ファイルを保存
+        self.write_workbook.save(file_path)
+    
+    def _preserve_column_row_dimensions(self):
+        """列幅と行高さの設定を保持"""
+        if not hasattr(self, 'write_workbook') or self.write_workbook is None:
+            return
+        
+        try:
+            # 元のワークブックから列幅と行高さの情報を取得して適用
+            for sheet_index in range(len(self.sheetnames)):
+                original_sheet = self.workbook.sheet_by_index(sheet_index)
+                write_sheet = self.write_workbook.get_sheet(sheet_index)
+                
+                # 列幅の設定を保持
+                if hasattr(original_sheet, 'colinfo_map'):
+                    for col_index, col_info in original_sheet.colinfo_map.items():
+                        if col_info and hasattr(col_info, 'width'):
+                            # xlwtの列幅設定
+                            try:
+                                # xlwtでは列幅を256倍して設定する必要がある
+                                width = int(col_info.width * 256 / 256)  # 元の幅を維持
+                                write_sheet.col(col_index).width = width
+                            except:
                                 pass
                 
-                # 結合セル情報を取得して適用
-                try:
-                    if hasattr(old_sheet, 'merged_cells'):
-                        merged_ranges = old_sheet.merged_cells
-                        for crange in merged_ranges:
-                            r1, r2, c1, c2 = crange
-                            # 結合セルの範囲を適切に変換（XLSは0ベース、XLSXは1ベース）
-                            new_sheet.merge_cells(start_row=r1+1, start_column=c1+1, 
-                                                end_row=r2, end_column=c2)
-                except (AttributeError, ValueError):
-                    # 結合セル情報の取得や適用に失敗した場合はスキップ
-                    pass
-            
-            new_workbook.save(file_path)
+                # 行高さの設定を保持
+                if hasattr(original_sheet, 'rowinfo_map'):
+                    for row_index, row_info in original_sheet.rowinfo_map.items():
+                        if row_info and hasattr(row_info, 'height'):
+                            # xlwtの行高さ設定
+                            try:
+                                # xlwtでは行高さをポイント単位で設定
+                                height = int(row_info.height * 20)  # twipsに変換
+                                write_sheet.row(row_index).height = height
+                            except:
+                                pass
+        except Exception as e:
+            print(f"Warning: Could not preserve column/row dimensions: {e}")
+            # エラーが発生しても処理を続行
 
 class UnifiedWorksheet:
     """XLS/XLSX両対応の統一ワークシートクラス"""
@@ -937,22 +904,25 @@ def api_translate():
             # シート処理後のメモリ解放
             gc.collect()
         
-        # 翻訳されたファイルを一時ファイルに保存（常にXLSX形式）
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp_file:
+        # 翻訳されたファイルを一時ファイルに保存（元の形式を保持）
+        file_extension = '.xlsx' if wb.file_format == 'xlsx' else '.xls'
+        with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as tmp_file:
             wb.save(tmp_file.name)
             tmp_file_path = tmp_file.name
         
-        # ファイル名を生成（翻訳済みの接頭辞を追加）
+        # ファイル名を生成（翻訳済みの接頭辞を追加、元の拡張子を保持）
         original_filename = file.filename
         name, ext = os.path.splitext(original_filename)
         translated_filename = f"{name}_translated{ext}"
         
-        # ファイルをダウンロード用に送信
+        # ファイルをダウンロード用に送信（適切なMIMEタイプを設定）
+        mimetype = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' if wb.file_format == 'xlsx' else 'application/vnd.ms-excel'
+        
         return send_file(
             tmp_file_path,
             as_attachment=True,
             download_name=translated_filename,
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            mimetype=mimetype
         )
         
     except Exception as e:
