@@ -7,6 +7,8 @@ import io
 import tempfile
 from urllib.parse import quote
 import re
+import gc
+import sys
 from datetime import datetime
 
 # パスを追加
@@ -174,53 +176,99 @@ def create_cell_mapping(sheet):
     
     return cell_mapping, translation_tasks
 
-def translate_with_context_preservation(translation_tasks, sheet, context, target_lang, source_lang, formality, api_key):
-    """文脈を保持しながら翻訳を実行"""
+def calculate_text_size(texts):
+    """テキストリストの合計文字数を計算"""
+    return sum(len(str(text)) for text in texts)
+
+def create_dynamic_batches(translation_tasks, max_chars_per_batch=50000):
+    """文字数制限に基づいて動的にバッチを作成"""
+    batches = []
+    current_batch = []
+    current_char_count = 0
+    
+    for task in translation_tasks:
+        text_length = len(str(task['text']))
+        
+        # 単一のセルが制限を超える場合は個別処理
+        if text_length > max_chars_per_batch:
+            # 現在のバッチがあれば追加
+            if current_batch:
+                batches.append(current_batch)
+                current_batch = []
+                current_char_count = 0
+            
+            # 長いセルは個別バッチとして処理
+            batches.append([task])
+            continue
+        
+        # バッチに追加すると制限を超える場合
+        if current_char_count + text_length > max_chars_per_batch:
+            if current_batch:
+                batches.append(current_batch)
+                current_batch = []
+                current_char_count = 0
+        
+        current_batch.append(task)
+        current_char_count += text_length
+    
+    # 最後のバッチを追加
+    if current_batch:
+        batches.append(current_batch)
+    
+    return batches
+
+def translate_with_staged_fallback(translation_tasks, sheet, context, target_lang, source_lang, formality, api_key, processing_params):
+    """段階的フォールバック処理付きの翻訳"""
     if not translation_tasks:
         return {}
     
-    # シート全体の概要を文脈として作成
+    # 処理パラメータを取得
+    max_chars_per_batch = processing_params['max_chars_per_batch']
+    context_limit = processing_params['context_limit']
+    enable_fallback = processing_params['enable_fallback']
+    
+    # 文脈の最適化
     sheet_context = f"シート名: {sheet.title}. " if sheet.title else ""
     
-    # ヘッダー行の情報を文脈に追加
+    # ヘッダー情報の簡潔化
     header_info = []
-    for row in range(1, min(4, sheet.max_row + 1)):
+    for row in range(1, min(3, sheet.max_row + 1)):
         row_texts = []
-        for col in range(1, min(sheet.max_column + 1, 10)):
+        for col in range(1, min(sheet.max_column + 1, 8)):
             cell = sheet.cell(row=row, column=col)
-            if cell.value and isinstance(cell.value, str):
+            if cell.value and isinstance(cell.value, str) and len(str(cell.value)) < 50:
                 row_texts.append(str(cell.value))
         if row_texts:
             header_info.append(" | ".join(row_texts))
     
     if header_info:
-        sheet_context += "ヘッダー情報: " + "; ".join(header_info) + ". "
+        sheet_context += "ヘッダー情報: " + "; ".join(header_info[:2]) + ". "
     
-    # 全体文脈を作成
+    # 文脈の長さ制限
     full_context = f"{context}. {sheet_context}" if context else sheet_context
+    if len(full_context) > context_limit:
+        full_context = full_context[:context_limit] + "..."
     
-    # 翻訳タスクを小さなバッチに分割
-    batch_size = 50
+    # 動的バッチ作成
+    batches = create_dynamic_batches(translation_tasks, max_chars_per_batch)
     translations = {}
+    failed_tasks = []
     
-    for i in range(0, len(translation_tasks), batch_size):
-        batch_tasks = translation_tasks[i:i + batch_size]
+    print(f"Processing {len(translation_tasks)} tasks in {len(batches)} batches")
+    
+    # 第1段階: 通常のバッチ処理
+    for batch_idx, batch_tasks in enumerate(batches):
         batch_texts = [task['text'] for task in batch_tasks]
+        batch_char_count = calculate_text_size(batch_texts)
         
-        # 各バッチの文脈を強化
-        batch_context = full_context
-        if batch_tasks:
-            # バッチ内の文脈情報を追加
-            local_contexts = [task['context'] for task in batch_tasks if task['context']]
-            if local_contexts:
-                batch_context += " ローカル文脈: " + "; ".join(local_contexts[:3])
+        print(f"Batch {batch_idx + 1}/{len(batches)}: {len(batch_tasks)} tasks, {batch_char_count} chars")
         
         try:
             translated_batch = translate_batch(
                 batch_texts,
                 target_lang,
                 source_lang,
-                batch_context,
+                full_context,
                 api_key,
                 formality
             )
@@ -229,14 +277,75 @@ def translate_with_context_preservation(translation_tasks, sheet, context, targe
             for j, task in enumerate(batch_tasks):
                 if j < len(translated_batch):
                     translations[task['cell_key']] = translated_batch[j]
+                else:
+                    failed_tasks.append(task)
                     
         except Exception as e:
-            print(f"Translation batch error: {str(e)}")
-            # エラーの場合は元のテキストを保持
-            for task in batch_tasks:
+            print(f"Translation batch {batch_idx + 1} error: {str(e)}")
+            failed_tasks.extend(batch_tasks)
+        
+        # メモリ解放
+        del batch_texts
+        gc.collect()
+    
+    # 第2段階: 失敗したタスクの個別処理（フォールバック有効時）
+    if failed_tasks and enable_fallback:
+        print(f"Fallback processing for {len(failed_tasks)} failed tasks")
+        
+        for task in failed_tasks:
+            try:
+                # 文脈を簡略化して個別処理
+                simple_context = context[:200] if context else ""
+                single_translation = translate_batch(
+                    [task['text']],
+                    target_lang,
+                    source_lang,
+                    simple_context,
+                    api_key,
+                    formality
+                )
+                
+                if single_translation:
+                    translations[task['cell_key']] = single_translation[0]
+                else:
+                    translations[task['cell_key']] = task['text']
+                    
+            except Exception as single_error:
+                print(f"Single task fallback error: {str(single_error)}")
+                translations[task['cell_key']] = task['text']
+    
+    # 第3段階: 文脈なしでの最終試行
+    remaining_failed = []
+    for task in failed_tasks:
+        if task['cell_key'] not in translations:
+            remaining_failed.append(task)
+    
+    if remaining_failed and enable_fallback:
+        print(f"Final fallback processing for {len(remaining_failed)} tasks")
+        
+        for task in remaining_failed:
+            try:
+                # 文脈なしで処理
+                final_translation = translate_batch(
+                    [task['text']],
+                    target_lang,
+                    source_lang,
+                    "",
+                    api_key,
+                    formality
+                )
+                
+                if final_translation:
+                    translations[task['cell_key']] = final_translation[0]
+                else:
+                    translations[task['cell_key']] = task['text']
+                    
+            except Exception as final_error:
+                print(f"Final fallback error: {str(final_error)}")
                 translations[task['cell_key']] = task['text']
     
     return translations
+
 
 def apply_translations_to_sheet(sheet, cell_mapping, translations):
     """翻訳結果をシートに適用"""
@@ -293,6 +402,82 @@ def validate_translation_accuracy(sheet, cell_mapping, translations):
             validation_results['cells_preserved'] += 1
     
     return validation_results
+
+def analyze_file_complexity(wb):
+    """ファイルの複雑さを分析して処理戦略を決定"""
+    analysis = {
+        'total_sheets': len(wb.sheetnames),
+        'total_cells': 0,
+        'total_text_chars': 0,
+        'max_sheet_cells': 0,
+        'has_merged_cells': False,
+        'complexity_score': 0,
+        'processing_strategy': 'standard'
+    }
+    
+    for sheet_name in wb.sheetnames:
+        sheet = wb[sheet_name]
+        sheet_cells = 0
+        sheet_text_chars = 0
+        
+        # 結合セルの確認
+        if len(sheet.merged_cells.ranges) > 0:
+            analysis['has_merged_cells'] = True
+        
+        # セルの分析
+        for row in sheet.iter_rows():
+            for cell in row:
+                if cell.value is not None:
+                    sheet_cells += 1
+                    if isinstance(cell.value, str):
+                        sheet_text_chars += len(cell.value)
+        
+        analysis['total_cells'] += sheet_cells
+        analysis['total_text_chars'] += sheet_text_chars
+        analysis['max_sheet_cells'] = max(analysis['max_sheet_cells'], sheet_cells)
+    
+    # 複雑さスコアの計算
+    analysis['complexity_score'] = (
+        analysis['total_cells'] * 0.1 +
+        analysis['total_text_chars'] * 0.001 +
+        analysis['total_sheets'] * 10 +
+        (50 if analysis['has_merged_cells'] else 0)
+    )
+    
+    # 処理戦略の決定
+    if analysis['complexity_score'] < 500:
+        analysis['processing_strategy'] = 'fast'
+    elif analysis['complexity_score'] < 2000:
+        analysis['processing_strategy'] = 'standard'
+    else:
+        analysis['processing_strategy'] = 'careful'
+    
+    return analysis
+
+def get_processing_parameters(strategy):
+    """処理戦略に基づいてパラメータを設定"""
+    params = {
+        'fast': {
+            'max_chars_per_batch': 80000,
+            'max_batches_per_sheet': 100,
+            'context_limit': 1500,
+            'enable_fallback': False
+        },
+        'standard': {
+            'max_chars_per_batch': 50000,
+            'max_batches_per_sheet': 200,
+            'context_limit': 1000,
+            'enable_fallback': True
+        },
+        'careful': {
+            'max_chars_per_batch': 30000,
+            'max_batches_per_sheet': 500,
+            'context_limit': 500,
+            'enable_fallback': True
+        }
+    }
+    
+    return params.get(strategy, params['standard'])
 
 @app.route('/')
 def index():
@@ -399,9 +584,19 @@ def api_translate():
         # Excelファイルを読み込み
         wb = openpyxl.load_workbook(io.BytesIO(file.read()))
         
+        # ファイルの複雑さを分析
+        file_analysis = analyze_file_complexity(wb)
+        processing_params = get_processing_parameters(file_analysis['processing_strategy'])
+        
+        print(f"File analysis: {file_analysis['total_sheets']} sheets, {file_analysis['total_cells']} cells, {file_analysis['total_text_chars']} chars")
+        print(f"Processing strategy: {file_analysis['processing_strategy']}")
+        print(f"Processing parameters: {processing_params}")
+        
         # 全シートを新しいセル対応保証アルゴリズムで処理
         for sheet_name in wb.sheetnames:
             sheet = wb[sheet_name]
+            
+            print(f"Processing sheet: {sheet_name}")
             
             # 結合セルの情報を保存
             merged_ranges = preserve_merged_cells(sheet)
@@ -409,15 +604,20 @@ def api_translate():
             # セルマッピングと翻訳タスクを作成
             cell_mapping, translation_tasks = create_cell_mapping(sheet)
             
-            # 翻訳の実行
-            translations = translate_with_context_preservation(
+            if not translation_tasks:
+                print(f"No translation tasks found for sheet {sheet_name}")
+                continue
+            
+            # 翻訳の実行（段階的フォールバック付き）
+            translations = translate_with_staged_fallback(
                 translation_tasks,
                 sheet,
                 context,
                 target_lang,
                 source_lang,
                 formality,
-                deepl_api_key
+                deepl_api_key,
+                processing_params
             )
             
             # 翻訳結果をシートに適用
@@ -428,8 +628,13 @@ def api_translate():
             if validation_results['errors']:
                 print(f"Validation errors for sheet {sheet_name}: {validation_results['errors']}")
             
+            print(f"Sheet {sheet_name} completed: {validation_results['cells_translated']}/{validation_results['cells_needing_translation']} cells translated")
+            
             # 結合セルを復元
             restore_merged_cells(sheet, merged_ranges)
+            
+            # シート処理後のメモリ解放
+            gc.collect()
         
         # 翻訳されたファイルを一時ファイルに保存
         with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp_file:
