@@ -1,6 +1,11 @@
-from flask import Flask, jsonify, request, render_template
+from flask import Flask, jsonify, request, render_template, send_file
 import os
 import sys
+import openpyxl
+import requests
+import io
+import tempfile
+from urllib.parse import quote
 
 # パスを追加
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -39,6 +44,31 @@ def health():
         'files_in_parent_dir': os.listdir(parent_dir) if os.path.exists(parent_dir) else 'parent directory not found'
     })
 
+def translate_text(text, target_lang, source_lang, context, api_key):
+    """DeepL APIを使用してテキストを翻訳"""
+    if not text or not text.strip():
+        return text
+    
+    url = "https://api-free.deepl.com/v2/translate"
+    
+    data = {
+        'auth_key': api_key,
+        'text': text,
+        'target_lang': target_lang,
+        'source_lang': source_lang if source_lang != 'auto' else None
+    }
+    
+    if context:
+        data['context'] = context
+    
+    response = requests.post(url, data=data)
+    
+    if response.status_code == 200:
+        result = response.json()
+        return result['translations'][0]['text']
+    else:
+        raise Exception(f"DeepL API error: {response.status_code} - {response.text}")
+
 @app.route('/api/translate', methods=['POST'])
 def api_translate():
     try:
@@ -55,12 +85,51 @@ def api_translate():
         if file.filename == '':
             return jsonify({'error': 'No file selected'}), 400
         
-        return jsonify({
-            'success': True,
-            'message': 'Translation endpoint is working',
-            'filename': file.filename,
-            'api_key_configured': bool(deepl_api_key)
-        })
+        # パラメータ取得
+        source_lang = request.form.get('source_lang', 'JA')
+        target_lang = request.form.get('target_lang', 'EN-US')
+        context = request.form.get('context', '')
+        
+        # Excelファイルを読み込み
+        wb = openpyxl.load_workbook(io.BytesIO(file.read()))
+        
+        # 全シートの全セルを翻訳
+        for sheet_name in wb.sheetnames:
+            sheet = wb[sheet_name]
+            for row in sheet.iter_rows():
+                for cell in row:
+                    if cell.value and isinstance(cell.value, str):
+                        try:
+                            translated_text = translate_text(
+                                cell.value, 
+                                target_lang, 
+                                source_lang, 
+                                context, 
+                                deepl_api_key
+                            )
+                            cell.value = translated_text
+                        except Exception as e:
+                            print(f"Translation error for cell {cell.coordinate}: {str(e)}")
+                            # 翻訳エラーの場合は元のテキストを保持
+                            pass
+        
+        # 翻訳されたファイルを一時ファイルに保存
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp_file:
+            wb.save(tmp_file.name)
+            tmp_file_path = tmp_file.name
+        
+        # ファイル名を生成（翻訳済みの接頭辞を追加）
+        original_filename = file.filename
+        name, ext = os.path.splitext(original_filename)
+        translated_filename = f"{name}_translated{ext}"
+        
+        # ファイルをダウンロード用に送信
+        return send_file(
+            tmp_file_path,
+            as_attachment=True,
+            download_name=translated_filename,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
         
     except Exception as e:
         return jsonify({'error': str(e)}), 500
