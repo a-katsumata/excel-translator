@@ -11,10 +11,5 @@
       "src": "/(.*)",
       "dest": "api/index.py"
     }
-  ],
-  "env": {
-    "DEEPL_API_KEY": "@deepl_api_key",
-    "SECRET_KEY": "@secret_key",
-    "FLASK_ENV": "production"
-  }
+  ]
 }
