@@ -449,16 +449,22 @@ def restore_merged_cells(sheet, merged_ranges):
         
     for merged_range in merged_ranges:
         try:
+            # XLSファイルの場合は結合セル機能をスキップ
+            if hasattr(sheet, 'file_format') and sheet.file_format == 'xls':
+                continue
+            
             # XLSXの場合は文字列から復元
-            if isinstance(merged_range, str):
+            if isinstance(merged_range, str) and hasattr(sheet, 'merge_cells'):
                 sheet.merge_cells(merged_range)
             # XLSの場合はタプルから復元
-            elif isinstance(merged_range, (list, tuple)) and len(merged_range) == 4:
+            elif isinstance(merged_range, (list, tuple)) and len(merged_range) == 4 and hasattr(sheet, 'merge_cells'):
                 r1, r2, c1, c2 = merged_range
                 sheet.merge_cells(start_row=r1+1, start_column=c1+1, 
                                 end_row=r2, end_column=c2)
         except Exception as e:
-            print(f"Failed to restore merged cell {merged_range}: {str(e)}")
+            # XLSファイルの場合はエラーを出力せずにスキップ
+            if not (hasattr(sheet, 'file_format') and sheet.file_format == 'xls'):
+                print(f"Failed to restore merged cell {merged_range}: {str(e)}")
 
 def validate_translation_accuracy(sheet, cell_mapping, translations):
     """翻訳の正確性を検証"""
@@ -640,43 +646,44 @@ class UnifiedWorkbook:
             self._save_xls_with_translation(file_path)
     
     def _save_xls_with_translation(self, file_path):
-        """XLSファイルを翻訳データと共に保存"""
+        """XLSファイルを翻訳データと共に保存（シンプルな方法）"""
         try:
             print(f"DEBUG: Starting XLS save with {len(self.translated_data)} translations")
             
-            # xlutilsを使用して元のワークブックをコピー（すべての書式・図形を保持）
-            self.write_workbook = xlutils_copy(self.workbook)
-            print("DEBUG: xlutils copy completed")
+            # 新しいワークブックを作成（書式エラー回避）
+            self.write_workbook = xlwt.Workbook()
+            print("DEBUG: New workbook created")
             
-            # 列幅と行高さの設定を保持
-            self._preserve_column_row_dimensions()
-            print("DEBUG: Column/row dimensions preserved")
-            
-            # 翻訳されたデータを書き込み
+            # 各シートをコピー
             for sheet_name in self.sheetnames:
                 sheet_index = self.sheetnames.index(sheet_name)
-                write_sheet = self.write_workbook.get_sheet(sheet_index)
                 original_sheet = self.workbook.sheet_by_index(sheet_index)
+                write_sheet = self.write_workbook.add_sheet(sheet_name)
                 print(f"DEBUG: Processing sheet {sheet_name} (index {sheet_index})")
                 
-                # 翻訳データを適用
+                # 元のデータと翻訳データを書き込み
                 translations_applied = 0
-                for cell_key, translated_value in self.translated_data.items():
-                    if cell_key.startswith(f"{sheet_name}_"):
-                        parts = cell_key.split('_')
-                        if len(parts) >= 3:
-                            row = int(parts[-2]) - 1  # 0ベースに変換
-                            col = int(parts[-1]) - 1  # 0ベースに変換
-                            
+                for row in range(original_sheet.nrows):
+                    for col in range(original_sheet.ncols):
+                        cell_key = f"{sheet_name}_{row + 1}_{col + 1}"
+                        
+                        # 翻訳データがある場合は翻訳データを使用
+                        if cell_key in self.translated_data:
+                            translated_value = self.translated_data[cell_key]
                             try:
-                                # 翻訳された値を書き込み（シンプルな方法）
-                                write_sheet.write(row, col, translated_value)
-                                translations_applied += 1
-                                
+                                if translated_value is not None:
+                                    write_sheet.write(row, col, str(translated_value))
+                                    translations_applied += 1
                             except Exception as e:
                                 print(f"Error writing translated value to cell {cell_key}: {e}")
-                                # エラーが発生した場合はスキップ
-                                continue
+                        else:
+                            # 翻訳データがない場合は元のデータを使用
+                            try:
+                                original_value = original_sheet.cell_value(row, col)
+                                if original_value is not None and original_value != "":
+                                    write_sheet.write(row, col, original_value)
+                            except Exception as e:
+                                print(f"Error writing original value to cell ({row}, {col}): {e}")
                 
                 print(f"DEBUG: Applied {translations_applied} translations to sheet {sheet_name}")
             
