@@ -360,15 +360,34 @@ def apply_translations_to_sheet(sheet, cell_mapping, translations):
 def preserve_merged_cells(sheet):
     """結合セルの情報を保存"""
     merged_ranges = []
-    for merged_range in sheet.merged_cells.ranges:
-        merged_ranges.append(str(merged_range))
+    try:
+        if hasattr(sheet, 'merged_cells') and hasattr(sheet.merged_cells, 'ranges'):
+            # XLSXの場合
+            for merged_range in sheet.merged_cells.ranges:
+                merged_ranges.append(str(merged_range))
+        elif hasattr(sheet, 'merged_cells') and isinstance(sheet.merged_cells, list):
+            # XLSの場合
+            for merged_range in sheet.merged_cells:
+                merged_ranges.append(merged_range)
+    except:
+        pass
     return merged_ranges
 
 def restore_merged_cells(sheet, merged_ranges):
     """結合セルの情報を復元"""
+    if not merged_ranges:
+        return
+        
     for merged_range in merged_ranges:
         try:
-            sheet.merge_cells(merged_range)
+            # XLSXの場合は文字列から復元
+            if isinstance(merged_range, str):
+                sheet.merge_cells(merged_range)
+            # XLSの場合はタプルから復元
+            elif isinstance(merged_range, (list, tuple)) and len(merged_range) == 4:
+                r1, r2, c1, c2 = merged_range
+                sheet.merge_cells(start_row=r1+1, start_column=c1+1, 
+                                end_row=r2, end_column=c2)
         except Exception as e:
             print(f"Failed to restore merged cell {merged_range}: {str(e)}")
 
@@ -505,12 +524,13 @@ class UnifiedWorkbook:
     def __init__(self, file_data, file_format):
         self.file_format = file_format
         self.original_filename = None
+        self.translated_data = {}  # 翻訳データを保存
         
         if file_format == 'xlsx':
             self.workbook = openpyxl.load_workbook(file_data)
             self.sheetnames = self.workbook.sheetnames
         elif file_format == 'xls':
-            self.workbook = xlrd.open_workbook(file_contents=file_data.read())
+            self.workbook = xlrd.open_workbook(file_contents=file_data.read(), formatting_info=True)
             self.sheetnames = self.workbook.sheet_names()
         else:
             raise ValueError(f"Unsupported file format: {file_format}")
@@ -518,39 +538,147 @@ class UnifiedWorkbook:
     def get_sheet(self, sheet_name):
         """シートを取得"""
         if self.file_format == 'xlsx':
-            return UnifiedWorksheet(self.workbook[sheet_name], 'xlsx')
+            return UnifiedWorksheet(self.workbook[sheet_name], 'xlsx', self)
         elif self.file_format == 'xls':
             sheet_index = self.sheetnames.index(sheet_name)
-            return UnifiedWorksheet(self.workbook.sheet_by_index(sheet_index), 'xls')
+            return UnifiedWorksheet(self.workbook.sheet_by_index(sheet_index), 'xls', self)
     
     def save(self, file_path):
         """ファイルを保存（XLSX形式で統一）"""
         if self.file_format == 'xlsx':
             self.workbook.save(file_path)
         elif self.file_format == 'xls':
-            # XLSの場合はXLSX形式で保存
+            # XLSの場合はXLSX形式で保存（フォーマット保持）
             new_workbook = openpyxl.Workbook()
             new_workbook.remove(new_workbook.active)  # デフォルトシートを削除
             
             for sheet_name in self.sheetnames:
-                unified_sheet = self.get_sheet(sheet_name)
+                old_sheet = self.workbook.sheet_by_name(sheet_name)
                 new_sheet = new_workbook.create_sheet(title=sheet_name)
                 
-                # セルデータをコピー（翻訳されたデータを含む）
-                for row in range(1, unified_sheet.max_row + 1):
-                    for col in range(1, unified_sheet.max_column + 1):
-                        cell = unified_sheet.cell(row, col)
-                        if cell.value is not None:
-                            new_sheet.cell(row=row, column=col, value=cell.value)
+                # セルデータとフォーマットをコピー
+                for row in range(old_sheet.nrows):
+                    for col in range(old_sheet.ncols):
+                        # 翻訳された値があればそれを使用、なければ元の値
+                        cell_key = f"{sheet_name}_{row+1}_{col+1}"
+                        if cell_key in self.translated_data:
+                            cell_value = self.translated_data[cell_key]
+                        else:
+                            cell_value = old_sheet.cell_value(row, col)
+                        
+                        if cell_value is not None and cell_value != '':
+                            new_cell = new_sheet.cell(row=row+1, column=col+1, value=cell_value)
+                            
+                            # フォーマット情報を取得して適用
+                            try:
+                                xf_index = old_sheet.cell_xf_index(row, col)
+                                book_format_map = self.workbook.format_map
+                                
+                                if xf_index in book_format_map:
+                                    format_info = book_format_map[xf_index]
+                                    
+                                    # フォント情報を適用
+                                    if format_info.font_index < len(self.workbook.font_list):
+                                        font_info = self.workbook.font_list[format_info.font_index]
+                                        
+                                        # フォント設定の複合適用
+                                        font_kwargs = {}
+                                        if font_info.bold:
+                                            font_kwargs['bold'] = True
+                                        if font_info.italic:
+                                            font_kwargs['italic'] = True
+                                        if hasattr(font_info, 'struck_out') and font_info.struck_out:
+                                            font_kwargs['strike'] = True
+                                        if hasattr(font_info, 'underline_type') and font_info.underline_type:
+                                            font_kwargs['underline'] = 'single'
+                                        
+                                        # フォント名とサイズ
+                                        if hasattr(font_info, 'name') and font_info.name:
+                                            font_kwargs['name'] = font_info.name
+                                        if hasattr(font_info, 'height') and font_info.height:
+                                            font_kwargs['size'] = font_info.height // 20  # twipsからポイントに変換
+                                        
+                                        if font_kwargs:
+                                            new_cell.font = openpyxl.styles.Font(**font_kwargs)
+                                    
+                                    # 背景色設定
+                                    if hasattr(format_info, 'background') and format_info.background:
+                                        pattern_info = format_info.background
+                                        if hasattr(pattern_info, 'pattern_colour_index') and pattern_info.pattern_colour_index != 64:
+                                            # 基本的な背景色設定
+                                            try:
+                                                if pattern_info.pattern_colour_index < len(self.workbook.colour_map):
+                                                    color_rgb = self.workbook.colour_map[pattern_info.pattern_colour_index]
+                                                    if color_rgb:
+                                                        hex_color = f"{color_rgb[0]:02X}{color_rgb[1]:02X}{color_rgb[2]:02X}"
+                                                        new_cell.fill = openpyxl.styles.PatternFill(start_color=hex_color, end_color=hex_color, fill_type='solid')
+                                            except:
+                                                pass
+                                    
+                                    # 罫線設定
+                                    if hasattr(format_info, 'border'):
+                                        border_info = format_info.border
+                                        border_kwargs = {}
+                                        
+                                        # 各辺の罫線設定
+                                        if hasattr(border_info, 'left_line_style') and border_info.left_line_style:
+                                            border_kwargs['left'] = openpyxl.styles.Side(style='thin')
+                                        if hasattr(border_info, 'right_line_style') and border_info.right_line_style:
+                                            border_kwargs['right'] = openpyxl.styles.Side(style='thin')
+                                        if hasattr(border_info, 'top_line_style') and border_info.top_line_style:
+                                            border_kwargs['top'] = openpyxl.styles.Side(style='thin')
+                                        if hasattr(border_info, 'bottom_line_style') and border_info.bottom_line_style:
+                                            border_kwargs['bottom'] = openpyxl.styles.Side(style='thin')
+                                        
+                                        if border_kwargs:
+                                            new_cell.border = openpyxl.styles.Border(**border_kwargs)
+                                    
+                                    # 配置設定
+                                    if hasattr(format_info, 'alignment'):
+                                        alignment_info = format_info.alignment
+                                        alignment_kwargs = {}
+                                        
+                                        # 水平配置
+                                        if hasattr(alignment_info, 'hor_align'):
+                                            hor_align_map = {0: 'general', 1: 'left', 2: 'center', 3: 'right', 4: 'fill', 5: 'justify'}
+                                            if alignment_info.hor_align in hor_align_map:
+                                                alignment_kwargs['horizontal'] = hor_align_map[alignment_info.hor_align]
+                                        
+                                        # 垂直配置
+                                        if hasattr(alignment_info, 'vert_align'):
+                                            vert_align_map = {0: 'top', 1: 'center', 2: 'bottom', 3: 'justify'}
+                                            if alignment_info.vert_align in vert_align_map:
+                                                alignment_kwargs['vertical'] = vert_align_map[alignment_info.vert_align]
+                                        
+                                        if alignment_kwargs:
+                                            new_cell.alignment = openpyxl.styles.Alignment(**alignment_kwargs)
+                                            
+                            except (AttributeError, IndexError, KeyError):
+                                # フォーマット情報の取得に失敗した場合はスキップ
+                                pass
+                
+                # 結合セル情報を取得して適用
+                try:
+                    if hasattr(old_sheet, 'merged_cells'):
+                        merged_ranges = old_sheet.merged_cells
+                        for crange in merged_ranges:
+                            r1, r2, c1, c2 = crange
+                            # 結合セルの範囲を適切に変換（XLSは0ベース、XLSXは1ベース）
+                            new_sheet.merge_cells(start_row=r1+1, start_column=c1+1, 
+                                                end_row=r2, end_column=c2)
+                except (AttributeError, ValueError):
+                    # 結合セル情報の取得や適用に失敗した場合はスキップ
+                    pass
             
             new_workbook.save(file_path)
 
 class UnifiedWorksheet:
     """XLS/XLSX両対応の統一ワークシートクラス"""
     
-    def __init__(self, sheet, file_format):
+    def __init__(self, sheet, file_format, workbook=None):
         self.sheet = sheet
         self.file_format = file_format
+        self.workbook = workbook
         self.title = sheet.title if file_format == 'xlsx' else sheet.name
         
         if file_format == 'xlsx':
@@ -560,14 +688,25 @@ class UnifiedWorksheet:
         elif file_format == 'xls':
             self.max_row = sheet.nrows
             self.max_column = sheet.ncols
-            self.merged_cells = DummyMergedCells()  # XLSでは結合セル情報を簡素化
+            # XLSの結合セル情報を取得
+            self.merged_cells = self._get_xls_merged_cells()
+    
+    def _get_xls_merged_cells(self):
+        """XLSの結合セル情報を取得"""
+        merged_cells = DummyMergedCells()
+        try:
+            if hasattr(self.sheet, 'merged_cells'):
+                merged_cells.ranges = self.sheet.merged_cells
+        except:
+            pass
+        return merged_cells
     
     def cell(self, row, column):
         """セルを取得"""
         if self.file_format == 'xlsx':
             return self.sheet.cell(row=row, column=column)
         elif self.file_format == 'xls':
-            return UnifiedCell(self.sheet, row-1, column-1, 'xls')  # XLSは0ベースなので調整
+            return UnifiedCell(self.sheet, row-1, column-1, 'xls', self.workbook, self.title)
     
     def iter_rows(self):
         """行をイテレート"""
@@ -577,12 +716,14 @@ class UnifiedWorksheet:
 class UnifiedCell:
     """XLS/XLSX両対応の統一セルクラス"""
     
-    def __init__(self, sheet, row, column, file_format='xls'):
+    def __init__(self, sheet, row, column, file_format='xls', workbook=None, sheet_name=None):
         self.sheet = sheet
         self.row = row + 1  # 1ベースに変換
         self.column = column + 1  # 1ベースに変換
         self.coordinate = f"{chr(65 + column)}{row + 1}"
         self.file_format = file_format
+        self.workbook = workbook
+        self.sheet_name = sheet_name
         self._value = None
         
         if file_format == 'xls':
@@ -595,11 +736,21 @@ class UnifiedCell:
     
     @property
     def value(self):
+        # XLSファイルの場合、翻訳されたデータがあればそれを返す
+        if self.file_format == 'xls' and self.workbook:
+            cell_key = f"{self.sheet_name}_{self.row}_{self.column}"
+            if cell_key in self.workbook.translated_data:
+                return self.workbook.translated_data[cell_key]
         return self._value
     
     @value.setter
     def value(self, new_value):
-        self._value = new_value
+        if self.file_format == 'xls' and self.workbook:
+            # XLSファイルの場合、翻訳データをworkbookに保存
+            cell_key = f"{self.sheet_name}_{self.row}_{self.column}"
+            self.workbook.translated_data[cell_key] = new_value
+        else:
+            self._value = new_value
 
 class DummyMergedCells:
     """XLS用のダミー結合セルクラス"""
@@ -608,7 +759,10 @@ class DummyMergedCells:
         self.ranges = []
     
     def __len__(self):
-        return 0
+        return len(self.ranges)
+    
+    def __iter__(self):
+        return iter(self.ranges)
 
 @app.route('/')
 def index():
