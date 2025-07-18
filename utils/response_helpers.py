@@ -111,11 +111,36 @@ def create_health_response() -> Response:
     Returns:
         JSONレスポンス
     """
-    return jsonify({
+    import os
+    import sys
+    
+    health_data = {
         'status': 'healthy',
         'service': 'excel-translator',
-        'version': '1.0.0'
-    })
+        'version': '1.0.0',
+        'environment': {
+            'python_version': sys.version,
+            'platform': sys.platform,
+            'working_directory': os.getcwd(),
+            'has_deepl_key': bool(os.environ.get('DEEPL_API_KEY')),
+            'has_secret_key': bool(os.environ.get('SECRET_KEY'))
+        }
+    }
+    
+    # Test imports
+    try:
+        import excel_translator
+        health_data['imports'] = {'excel_translator': 'OK'}
+    except ImportError as e:
+        health_data['imports'] = {'excel_translator': f'ERROR: {str(e)}'}
+    
+    try:
+        import utils.validators
+        health_data['imports']['utils.validators'] = 'OK'
+    except ImportError as e:
+        health_data['imports']['utils.validators'] = f'ERROR: {str(e)}'
+    
+    return jsonify(health_data)
 
 
 def log_request_info(request, endpoint: str) -> None:

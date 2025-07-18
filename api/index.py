@@ -5,17 +5,60 @@ import logging
 from werkzeug.utils import secure_filename
 
 # パスを追加してモジュールをインポート
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from excel_translator import ExcelTranslator
-from utils.validators import ValidationError, validate_file_upload, validate_translation_params, validate_environment
-from utils.response_helpers import (
-    create_error_response, create_success_response, create_translation_result_response,
-    create_health_response, log_request_info, handle_exception
-)
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+sys.path.insert(0, parent_dir)
+
+try:
+    from excel_translator import ExcelTranslator
+    from utils.validators import ValidationError, validate_file_upload, validate_translation_params, validate_environment
+    from utils.response_helpers import (
+        create_error_response, create_success_response, create_translation_result_response,
+        create_health_response, log_request_info, handle_exception
+    )
+except ImportError as e:
+    logger.error(f"Import error: {e}")
+    # Fallback imports with absolute paths
+    import importlib.util
+    
+    # Import excel_translator
+    spec = importlib.util.spec_from_file_location("excel_translator", os.path.join(parent_dir, "excel_translator.py"))
+    excel_translator_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(excel_translator_module)
+    ExcelTranslator = excel_translator_module.ExcelTranslator
+    
+    # Import utils
+    validators_path = os.path.join(parent_dir, "utils", "validators.py")
+    spec = importlib.util.spec_from_file_location("validators", validators_path)
+    validators_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(validators_module)
+    ValidationError = validators_module.ValidationError
+    validate_file_upload = validators_module.validate_file_upload
+    validate_translation_params = validators_module.validate_translation_params
+    validate_environment = validators_module.validate_environment
+    
+    response_helpers_path = os.path.join(parent_dir, "utils", "response_helpers.py")
+    spec = importlib.util.spec_from_file_location("response_helpers", response_helpers_path)
+    response_helpers_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(response_helpers_module)
+    create_error_response = response_helpers_module.create_error_response
+    create_success_response = response_helpers_module.create_success_response
+    create_translation_result_response = response_helpers_module.create_translation_result_response
+    create_health_response = response_helpers_module.create_health_response
+    log_request_info = response_helpers_module.log_request_info
+    handle_exception = response_helpers_module.handle_exception
 
 # ログ設定
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# Debug: Environment and path information
+logger.info(f"Python version: {sys.version}")
+logger.info(f"Current working directory: {os.getcwd()}")
+logger.info(f"Script directory: {current_dir}")
+logger.info(f"Parent directory: {parent_dir}")
+logger.info(f"Python path: {sys.path}")
+logger.info(f"Environment variables: {list(os.environ.keys())}")
 
 app = Flask(__name__, template_folder='../templates')
 app.secret_key = os.environ.get('SECRET_KEY', 'excel-translator-secret-key')
@@ -174,8 +217,8 @@ def api_translate():
         return handle_exception(e, 'api_translate')
 
 # Vercel用のハンドラー
-def handler(request):
-    return app(request.environ, lambda *args: None)
+def handler(environ, start_response):
+    return app(environ, start_response)
 
 if __name__ == '__main__':
     app.run(debug=False)
