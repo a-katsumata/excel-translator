@@ -183,17 +183,30 @@ def calculate_text_size(texts):
     """テキストリストの合計文字数を計算"""
     return sum(len(str(text)) for text in texts)
 
+def estimate_payload_size(texts):
+    """JSONペイロードの推定サイズを計算（オーバーヘッドを含む）"""
+    # 基本的なJSON構造のオーバーヘッド
+    base_overhead = 200  # リクエストヘッダーなど
+    
+    # 各テキストのJSONオーバーヘッド（引用符、カンマ、構造など）
+    text_overhead = sum(len(str(text)) * 1.2 + 20 for text in texts)  # 20%のオーバーヘッド + 固定値
+    
+    return int(base_overhead + text_overhead)
+
 def create_dynamic_batches(translation_tasks, max_chars_per_batch=50000):
-    """文字数制限に基づいて動的にバッチを作成"""
+    """文字数制限とJSONペイロードサイズに基づいて動的にバッチを作成"""
     batches = []
     current_batch = []
     current_char_count = 0
+    
+    # 安全マージンを追加（実際の制限の80%を使用）
+    safe_limit = int(max_chars_per_batch * 0.8)
     
     for task in translation_tasks:
         text_length = len(str(task['text']))
         
         # 単一のセルが制限を超える場合は個別処理
-        if text_length > max_chars_per_batch:
+        if text_length > safe_limit:
             # 現在のバッチがあれば追加
             if current_batch:
                 batches.append(current_batch)
@@ -204,15 +217,20 @@ def create_dynamic_batches(translation_tasks, max_chars_per_batch=50000):
             batches.append([task])
             continue
         
-        # バッチに追加すると制限を超える場合
-        if current_char_count + text_length > max_chars_per_batch:
-            if current_batch:
-                batches.append(current_batch)
-                current_batch = []
-                current_char_count = 0
+        # バッチに追加すると制限を超える場合をチェック
+        test_batch = current_batch + [task]
+        test_texts = [t['text'] for t in test_batch]
+        estimated_payload = estimate_payload_size(test_texts)
         
-        current_batch.append(task)
-        current_char_count += text_length
+        if estimated_payload > safe_limit and current_batch:
+            # 現在のバッチを完成させる
+            batches.append(current_batch)
+            current_batch = [task]
+            current_char_count = text_length
+        else:
+            # バッチに追加
+            current_batch.append(task)
+            current_char_count += text_length
     
     # 最後のバッチを追加
     if current_batch:
@@ -284,8 +302,58 @@ def translate_with_staged_fallback(translation_tasks, sheet, context, target_lan
                     failed_tasks.append(task)
                     
         except Exception as e:
-            print(f"Translation batch {batch_idx + 1} error: {str(e)}")
-            failed_tasks.extend(batch_tasks)
+            error_msg = str(e)
+            print(f"Translation batch {batch_idx + 1} error: {error_msg}")
+            
+            # 413エラー（Payload too large）の場合、バッチを分割して再試行
+            if "413" in error_msg and "Payload too large" in error_msg:
+                print(f"Payload too large error detected. Splitting batch of {len(batch_tasks)} tasks...")
+                
+                # バッチを半分に分割して再試行
+                mid_point = len(batch_tasks) // 2
+                if mid_point > 0:
+                    first_half = batch_tasks[:mid_point]
+                    second_half = batch_tasks[mid_point:]
+                    
+                    # 第1半分を処理
+                    try:
+                        first_texts = [task['text'] for task in first_half]
+                        first_translated = translate_batch(
+                            first_texts, target_lang, source_lang, formality, 
+                            deepl_api_key, full_context
+                        )
+                        for j, task in enumerate(first_half):
+                            if j < len(first_translated):
+                                translations[task['cell_key']] = first_translated[j]
+                            else:
+                                failed_tasks.append(task)
+                        print(f"First half ({len(first_half)} tasks) processed successfully")
+                    except Exception as e2:
+                        print(f"First half still failed: {str(e2)}")
+                        failed_tasks.extend(first_half)
+                    
+                    # 第2半分を処理
+                    try:
+                        second_texts = [task['text'] for task in second_half]
+                        second_translated = translate_batch(
+                            second_texts, target_lang, source_lang, formality, 
+                            deepl_api_key, full_context
+                        )
+                        for j, task in enumerate(second_half):
+                            if j < len(second_translated):
+                                translations[task['cell_key']] = second_translated[j]
+                            else:
+                                failed_tasks.append(task)
+                        print(f"Second half ({len(second_half)} tasks) processed successfully")
+                    except Exception as e3:
+                        print(f"Second half still failed: {str(e3)}")
+                        failed_tasks.extend(second_half)
+                else:
+                    # 単一タスクでも413エラーの場合は失敗として扱う
+                    failed_tasks.extend(batch_tasks)
+            else:
+                # 413エラー以外の場合は通常の失敗として扱う
+                failed_tasks.extend(batch_tasks)
         
         # メモリ解放
         del batch_texts
@@ -466,13 +534,23 @@ def analyze_file_complexity(wb):
         (50 if analysis['has_merged_cells'] else 0)
     )
     
-    # 処理戦略の決定
-    if analysis['complexity_score'] < 500:
+    # 処理戦略の決定（より保守的な基準）
+    if analysis['complexity_score'] < 200:
         analysis['processing_strategy'] = 'fast'
-    elif analysis['complexity_score'] < 2000:
+    elif analysis['complexity_score'] < 800:
         analysis['processing_strategy'] = 'standard'
     else:
         analysis['processing_strategy'] = 'careful'
+    
+    # 大きなファイルの場合は強制的に慎重な処理
+    if analysis['total_text_chars'] > 100000 or analysis['total_cells'] > 3000:
+        analysis['processing_strategy'] = 'careful'
+        print(f"Large file detected: {analysis['total_text_chars']} chars, {analysis['total_cells']} cells - using careful strategy")
+    
+    # 超大型ファイルの場合は超安全モード
+    if analysis['total_text_chars'] > 300000 or analysis['total_cells'] > 8000:
+        analysis['processing_strategy'] = 'ultra_safe'
+        print(f"Very large file detected: {analysis['total_text_chars']} chars, {analysis['total_cells']} cells - using ultra_safe strategy")
     
     return analysis
 
@@ -480,21 +558,27 @@ def get_processing_parameters(strategy):
     """処理戦略に基づいてパラメータを設定"""
     params = {
         'fast': {
-            'max_chars_per_batch': 80000,
+            'max_chars_per_batch': 15000,  # 大幅削減: 80000 → 15000
             'max_batches_per_sheet': 100,
             'context_limit': 1500,
-            'enable_fallback': False
+            'enable_fallback': True  # フォールバック機能を有効化
         },
         'standard': {
-            'max_chars_per_batch': 50000,
+            'max_chars_per_batch': 10000,  # 大幅削減: 50000 → 10000
             'max_batches_per_sheet': 200,
             'context_limit': 1000,
             'enable_fallback': True
         },
         'careful': {
-            'max_chars_per_batch': 30000,
+            'max_chars_per_batch': 5000,   # 大幅削減: 30000 → 5000
             'max_batches_per_sheet': 500,
             'context_limit': 500,
+            'enable_fallback': True
+        },
+        'ultra_safe': {
+            'max_chars_per_batch': 2000,   # 超安全モード
+            'max_batches_per_sheet': 1000,
+            'context_limit': 200,
             'enable_fallback': True
         }
     }
