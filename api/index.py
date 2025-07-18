@@ -557,49 +557,55 @@ class UnifiedWorkbook:
     
     def _save_xls_with_translation(self, file_path):
         """XLSファイルを翻訳データと共に保存"""
-        # xlutilsを使用して元のワークブックをコピー（すべての書式・図形を保持）
-        self.write_workbook = xlutils_copy(self.workbook)
-        
-        # 列幅と行高さの設定を保持
-        self._preserve_column_row_dimensions()
-        
-        # 翻訳されたデータを書き込み
-        for sheet_name in self.sheetnames:
-            sheet_index = self.sheetnames.index(sheet_name)
-            write_sheet = self.write_workbook.get_sheet(sheet_index)
-            original_sheet = self.workbook.sheet_by_index(sheet_index)
+        try:
+            print(f"DEBUG: Starting XLS save with {len(self.translated_data)} translations")
             
-            # 翻訳データを適用
-            for cell_key, translated_value in self.translated_data.items():
-                if cell_key.startswith(f"{sheet_name}_"):
-                    parts = cell_key.split('_')
-                    if len(parts) >= 3:
-                        row = int(parts[-2]) - 1  # 0ベースに変換
-                        col = int(parts[-1]) - 1  # 0ベースに変換
-                        
-                        try:
-                            # 元のセルの書式情報を取得
-                            original_xf_index = original_sheet.cell_xf_index(row, col)
+            # xlutilsを使用して元のワークブックをコピー（すべての書式・図形を保持）
+            self.write_workbook = xlutils_copy(self.workbook)
+            print("DEBUG: xlutils copy completed")
+            
+            # 列幅と行高さの設定を保持
+            self._preserve_column_row_dimensions()
+            print("DEBUG: Column/row dimensions preserved")
+            
+            # 翻訳されたデータを書き込み
+            for sheet_name in self.sheetnames:
+                sheet_index = self.sheetnames.index(sheet_name)
+                write_sheet = self.write_workbook.get_sheet(sheet_index)
+                original_sheet = self.workbook.sheet_by_index(sheet_index)
+                print(f"DEBUG: Processing sheet {sheet_name} (index {sheet_index})")
+                
+                # 翻訳データを適用
+                translations_applied = 0
+                for cell_key, translated_value in self.translated_data.items():
+                    if cell_key.startswith(f"{sheet_name}_"):
+                        parts = cell_key.split('_')
+                        if len(parts) >= 3:
+                            row = int(parts[-2]) - 1  # 0ベースに変換
+                            col = int(parts[-1]) - 1  # 0ベースに変換
                             
-                            # 翻訳された値を元の書式で書き込み
-                            write_sheet.write(row, col, translated_value)
-                            
-                            # 書式を維持するために、元の書式情報を再適用
-                            if hasattr(write_sheet, '_Worksheet__rows'):
-                                if row in write_sheet._Worksheet__rows:
-                                    if col in write_sheet._Worksheet__rows[row]:
-                                        write_sheet._Worksheet__rows[row][col].xf_idx = original_xf_index
-                            
-                        except Exception as e:
-                            print(f"Error writing translated value to cell {cell_key}: {e}")
-                            # エラーが発生した場合も、値だけは書き込む
                             try:
+                                # 翻訳された値を書き込み（シンプルな方法）
                                 write_sheet.write(row, col, translated_value)
-                            except:
-                                pass
-        
-        # ファイルを保存
-        self.write_workbook.save(file_path)
+                                translations_applied += 1
+                                
+                            except Exception as e:
+                                print(f"Error writing translated value to cell {cell_key}: {e}")
+                                # エラーが発生した場合はスキップ
+                                continue
+                
+                print(f"DEBUG: Applied {translations_applied} translations to sheet {sheet_name}")
+            
+            # ファイルを保存
+            print(f"DEBUG: Saving file to {file_path}")
+            self.write_workbook.save(file_path)
+            print("DEBUG: XLS file saved successfully")
+            
+        except Exception as e:
+            print(f"ERROR in _save_xls_with_translation: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
     
     def _preserve_column_row_dimensions(self):
         """列幅と行高さの設定を保持"""
@@ -607,34 +613,41 @@ class UnifiedWorkbook:
             return
         
         try:
+            print("DEBUG: Starting column/row dimension preservation")
             # 元のワークブックから列幅と行高さの情報を取得して適用
             for sheet_index in range(len(self.sheetnames)):
                 original_sheet = self.workbook.sheet_by_index(sheet_index)
                 write_sheet = self.write_workbook.get_sheet(sheet_index)
                 
-                # 列幅の設定を保持
-                if hasattr(original_sheet, 'colinfo_map'):
-                    for col_index, col_info in original_sheet.colinfo_map.items():
-                        if col_info and hasattr(col_info, 'width'):
-                            # xlwtの列幅設定
-                            try:
-                                # xlwtでは列幅を256倍して設定する必要がある
-                                width = int(col_info.width * 256 / 256)  # 元の幅を維持
-                                write_sheet.col(col_index).width = width
-                            except:
-                                pass
+                # 列幅の設定を保持（基本的なバージョン）
+                try:
+                    if hasattr(original_sheet, 'colinfo_map') and original_sheet.colinfo_map:
+                        for col_index, col_info in original_sheet.colinfo_map.items():
+                            if col_info and hasattr(col_info, 'width'):
+                                try:
+                                    # xlwtの列幅設定（簡単な方法）
+                                    width = int(col_info.width)
+                                    write_sheet.col(col_index).width = width
+                                except:
+                                    pass
+                except Exception as e:
+                    print(f"DEBUG: Column width preservation failed: {e}")
                 
-                # 行高さの設定を保持
-                if hasattr(original_sheet, 'rowinfo_map'):
-                    for row_index, row_info in original_sheet.rowinfo_map.items():
-                        if row_info and hasattr(row_info, 'height'):
-                            # xlwtの行高さ設定
-                            try:
-                                # xlwtでは行高さをポイント単位で設定
-                                height = int(row_info.height * 20)  # twipsに変換
-                                write_sheet.row(row_index).height = height
-                            except:
-                                pass
+                # 行高さの設定を保持（基本的なバージョン）
+                try:
+                    if hasattr(original_sheet, 'rowinfo_map') and original_sheet.rowinfo_map:
+                        for row_index, row_info in original_sheet.rowinfo_map.items():
+                            if row_info and hasattr(row_info, 'height'):
+                                try:
+                                    # xlwtの行高さ設定（簡単な方法）
+                                    height = int(row_info.height)
+                                    write_sheet.row(row_index).height = height
+                                except:
+                                    pass
+                except Exception as e:
+                    print(f"DEBUG: Row height preservation failed: {e}")
+            
+            print("DEBUG: Column/row dimension preservation completed")
         except Exception as e:
             print(f"Warning: Could not preserve column/row dimensions: {e}")
             # エラーが発生しても処理を続行
@@ -850,7 +863,14 @@ def api_translate():
         print(f"Detected file format: {file_format}")
         
         # 統一ワークブックを作成
-        wb = UnifiedWorkbook(file_data, file_format)
+        try:
+            wb = UnifiedWorkbook(file_data, file_format)
+            print(f"Successfully created UnifiedWorkbook with {len(wb.sheetnames)} sheets")
+        except Exception as e:
+            print(f"Error creating UnifiedWorkbook: {e}")
+            import traceback
+            traceback.print_exc()
+            return jsonify({'error': f'Failed to read file: {str(e)}'}), 500
         
         # ファイルの複雑さを分析
         file_analysis = analyze_file_complexity(wb)
@@ -906,9 +926,17 @@ def api_translate():
         
         # 翻訳されたファイルを一時ファイルに保存（元の形式を保持）
         file_extension = '.xlsx' if wb.file_format == 'xlsx' else '.xls'
-        with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as tmp_file:
-            wb.save(tmp_file.name)
-            tmp_file_path = tmp_file.name
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as tmp_file:
+                print(f"Saving translated file as {file_extension} format")
+                wb.save(tmp_file.name)
+                tmp_file_path = tmp_file.name
+                print(f"Successfully saved to {tmp_file_path}")
+        except Exception as e:
+            print(f"Error saving translated file: {e}")
+            import traceback
+            traceback.print_exc()
+            return jsonify({'error': f'Failed to save translated file: {str(e)}'}), 500
         
         # ファイル名を生成（翻訳済みの接頭辞を追加、元の拡張子を保持）
         original_filename = file.filename
