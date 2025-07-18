@@ -1,11 +1,6 @@
 from flask import Flask, jsonify, request, render_template
 import os
 import sys
-import logging
-
-# ログ設定
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 # パスを追加
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -15,18 +10,17 @@ sys.path.insert(0, parent_dir)
 app = Flask(__name__, template_folder='../templates')
 app.secret_key = os.environ.get('SECRET_KEY', 'excel-translator-secret-key')
 
-# 基本的なヘルスチェック
 @app.route('/')
 def index():
     try:
         return render_template('index.html')
     except Exception as e:
-        logger.error(f"Index error: {e}")
         return jsonify({
             'error': 'Template error',
             'message': str(e),
             'working_directory': os.getcwd(),
-            'template_folder': app.template_folder
+            'template_folder': app.template_folder,
+            'files_in_templates': os.listdir(os.path.join(parent_dir, 'templates')) if os.path.exists(os.path.join(parent_dir, 'templates')) else 'templates directory not found'
         }), 500
 
 @app.route('/health')
@@ -36,8 +30,13 @@ def health():
         'service': 'excel-translator',
         'python_version': sys.version,
         'working_directory': os.getcwd(),
+        'parent_directory': parent_dir,
+        'current_directory': current_dir,
+        'template_folder': app.template_folder,
         'environment_variables': list(os.environ.keys()),
-        'deepl_api_key_exists': bool(os.environ.get('DEEPL_API_KEY'))
+        'deepl_api_key_exists': bool(os.environ.get('DEEPL_API_KEY')),
+        'files_in_current_dir': os.listdir(os.getcwd()),
+        'files_in_parent_dir': os.listdir(parent_dir) if os.path.exists(parent_dir) else 'parent directory not found'
     })
 
 @app.route('/api/translate', methods=['POST'])
@@ -56,7 +55,6 @@ def api_translate():
         if file.filename == '':
             return jsonify({'error': 'No file selected'}), 400
         
-        # 基本的な翻訳処理（後で実装）
         return jsonify({
             'success': True,
             'message': 'Translation endpoint is working',
@@ -65,18 +63,12 @@ def api_translate():
         })
         
     except Exception as e:
-        logger.error(f"API translate error: {e}")
         return jsonify({'error': str(e)}), 500
 
-# Vercel用のハンドラー
-def handler(environ, start_response):
+# Vercel用のエクスポート
+def app_handler(environ, start_response):
     return app(environ, start_response)
 
-# デバッグ情報
-logger.info(f"Python version: {sys.version}")
-logger.info(f"Current working directory: {os.getcwd()}")
-logger.info(f"Template folder: {app.template_folder}")
-logger.info(f"Environment variables: {list(os.environ.keys())}")
-
+# Vercel用のapp変数をエクスポート
 if __name__ == '__main__':
     app.run(debug=False)
