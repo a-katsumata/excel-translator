@@ -471,7 +471,11 @@
                             const a = document.createElement("a");
                             a.style.display = "none";
                             a.href = url;
-                            a.download = `${fileInput.files[0].name.replace(/\.[^/.]+$/, "")}_translated.xlsx`;
+                            // 元のファイル拡張子を保持
+                            const originalName = fileInput.files[0].name;
+                            const nameWithoutExt = originalName.replace(/\.[^/.]+$/, "");
+                            const originalExt = originalName.split('.').pop();
+                            a.download = `${nameWithoutExt}_translated.${originalExt}`;
                             document.body.appendChild(a);
                             a.click();
                             window.URL.revokeObjectURL(url);
