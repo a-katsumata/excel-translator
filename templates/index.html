@@ -198,9 +198,64 @@
 
         // フォーム送信時の処理
         document.getElementById('upload-form').addEventListener('submit', (e) => {
+            e.preventDefault();
+            
             submitBtn.disabled = true;
             loadingSpinner.classList.remove('d-none');
             submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>翻訳中...';
+            
+            // FormDataを作成
+            const formData = new FormData();
+            formData.append('file', fileInput.files[0]);
+            formData.append('source_lang', document.getElementById('source_lang').value);
+            formData.append('target_lang', document.getElementById('target_lang').value);
+            formData.append('context', document.getElementById('context').value);
+            
+            // fetchでファイルアップロード（タイムアウト設定）
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 300000); // 5分でタイムアウト
+            
+            fetch('/api/translate', {
+                method: 'POST',
+                body: formData,
+                signal: controller.signal
+            })
+            .then(response => {
+                clearTimeout(timeoutId);
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                return response.blob();
+            })
+            .then(blob => {
+                // ファイルをダウンロード
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.style.display = 'none';
+                a.href = url;
+                a.download = `${fileInput.files[0].name.replace(/\.[^/.]+$/, '')}_translated.xlsx`;
+                document.body.appendChild(a);
+                a.click();
+                window.URL.revokeObjectURL(url);
+                
+                // 成功メッセージ
+                alert('翻訳が完了しました！ファイルがダウンロードされます。');
+            })
+            .catch(error => {
+                clearTimeout(timeoutId);
+                console.error('Error:', error);
+                if (error.name === 'AbortError') {
+                    alert('翻訳がタイムアウトしました。ファイルサイズが大きすぎる可能性があります。');
+                } else {
+                    alert('翻訳中にエラーが発生しました: ' + error.message);
+                }
+            })
+            .finally(() => {
+                // ボタンを元に戻す
+                submitBtn.disabled = false;
+                loadingSpinner.classList.add('d-none');
+                submitBtn.innerHTML = '翻訳を開始';
+            });
         });
     </script>
 </body>

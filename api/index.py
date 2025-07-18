@@ -44,16 +44,28 @@ def health():
         'files_in_parent_dir': os.listdir(parent_dir) if os.path.exists(parent_dir) else 'parent directory not found'
     })
 
-def translate_text(text, target_lang, source_lang, context, api_key):
-    """DeepL APIを使用してテキストを翻訳"""
-    if not text or not text.strip():
-        return text
+def translate_batch(texts, target_lang, source_lang, context, api_key):
+    """DeepL APIを使用して複数のテキストを一括翻訳"""
+    if not texts:
+        return []
+    
+    # 空のテキストを除外し、インデックスを記録
+    non_empty_texts = []
+    text_indices = []
+    
+    for i, text in enumerate(texts):
+        if text and text.strip():
+            non_empty_texts.append(text)
+            text_indices.append(i)
+    
+    if not non_empty_texts:
+        return texts
     
     url = "https://api-free.deepl.com/v2/translate"
     
     data = {
         'auth_key': api_key,
-        'text': text,
+        'text': non_empty_texts,
         'target_lang': target_lang,
         'source_lang': source_lang if source_lang != 'auto' else None
     }
@@ -65,7 +77,14 @@ def translate_text(text, target_lang, source_lang, context, api_key):
     
     if response.status_code == 200:
         result = response.json()
-        return result['translations'][0]['text']
+        translated_texts = [t['text'] for t in result['translations']]
+        
+        # 結果を元の配列に戻す
+        final_results = list(texts)
+        for i, translated_text in enumerate(translated_texts):
+            final_results[text_indices[i]] = translated_text
+        
+        return final_results
     else:
         raise Exception(f"DeepL API error: {response.status_code} - {response.text}")
 
@@ -93,25 +112,43 @@ def api_translate():
         # Excelファイルを読み込み
         wb = openpyxl.load_workbook(io.BytesIO(file.read()))
         
-        # 全シートの全セルを翻訳
+        # 全シートの全セルを翻訳（バッチ処理）
         for sheet_name in wb.sheetnames:
             sheet = wb[sheet_name]
+            
+            # 翻訳対象のセルを収集
+            cells_to_translate = []
+            texts_to_translate = []
+            
             for row in sheet.iter_rows():
                 for cell in row:
                     if cell.value and isinstance(cell.value, str):
-                        try:
-                            translated_text = translate_text(
-                                cell.value, 
-                                target_lang, 
-                                source_lang, 
-                                context, 
-                                deepl_api_key
-                            )
-                            cell.value = translated_text
-                        except Exception as e:
-                            print(f"Translation error for cell {cell.coordinate}: {str(e)}")
-                            # 翻訳エラーの場合は元のテキストを保持
-                            pass
+                        cells_to_translate.append(cell)
+                        texts_to_translate.append(cell.value)
+            
+            # バッチで翻訳（最大50個ずつ）
+            batch_size = 50
+            for i in range(0, len(texts_to_translate), batch_size):
+                batch_texts = texts_to_translate[i:i+batch_size]
+                batch_cells = cells_to_translate[i:i+batch_size]
+                
+                try:
+                    translated_batch = translate_batch(
+                        batch_texts,
+                        target_lang,
+                        source_lang,
+                        context,
+                        deepl_api_key
+                    )
+                    
+                    # 翻訳結果をセルに適用
+                    for j, translated_text in enumerate(translated_batch):
+                        batch_cells[j].value = translated_text
+                        
+                except Exception as e:
+                    print(f"Translation error for batch: {str(e)}")
+                    # バッチエラーの場合は元のテキストを保持
+                    pass
         
         # 翻訳されたファイルを一時ファイルに保存
         with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp_file:
