@@ -65,18 +65,42 @@
 
                             <!-- 文脈入力 -->
                             <div class="mb-4">
-                                <label for="context" class="form-label">文脈（翻訳の精度向上のため）</label>
+                                <label for="context" class="form-label">文脈・業界（翻訳の精度向上のため）</label>
                                 <select class="form-select" id="context-select" onchange="updateContextInput()">
                                     <option value="custom">カスタム入力</option>
-                                    <option value="日程表">日程表</option>
-                                    <option value="事業計画">事業計画</option>
-                                    <option value="財務諸表">財務諸表</option>
-                                    <option value="会議議事録">会議議事録</option>
-                                    <option value="プレゼンテーション">プレゼンテーション</option>
+                                    <optgroup label="業務文書">
+                                        <option value="日程表・スケジュール">日程表・スケジュール</option>
+                                        <option value="事業計画・戦略文書">事業計画・戦略文書</option>
+                                        <option value="会議議事録・打合せ記録">会議議事録・打合せ記録</option>
+                                        <option value="プレゼンテーション・資料">プレゼンテーション・資料</option>
+                                        <option value="製品・サービス仕様書">製品・サービス仕様書</option>
+                                    </optgroup>
+                                    <optgroup label="財務・会計">
+                                        <option value="財務諸表・決算書">財務諸表・決算書</option>
+                                        <option value="予算・コスト管理">予算・コスト管理</option>
+                                        <option value="売上・収益レポート">売上・収益レポート</option>
+                                        <option value="投資・資金調達">投資・資金調達</option>
+                                    </optgroup>
+                                    <optgroup label="技術・IT">
+                                        <option value="技術仕様書・開発文書">技術仕様書・開発文書</option>
+                                        <option value="システム・ソフトウェア">システム・ソフトウェア</option>
+                                        <option value="データ分析・レポート">データ分析・レポート</option>
+                                        <option value="研究開発・実験記録">研究開発・実験記録</option>
+                                    </optgroup>
+                                    <optgroup label="人事・組織">
+                                        <option value="人事評価・労務管理">人事評価・労務管理</option>
+                                        <option value="組織図・役職">組織図・役職</option>
+                                        <option value="研修・教育資料">研修・教育資料</option>
+                                    </optgroup>
+                                    <optgroup label="マーケティング・営業">
+                                        <option value="マーケティング・広告">マーケティング・広告</option>
+                                        <option value="営業・顧客管理">営業・顧客管理</option>
+                                        <option value="商品・価格リスト">商品・価格リスト</option>
+                                    </optgroup>
                                 </select>
                                 <input type="text" class="form-control mt-2" id="context" name="context" 
                                        placeholder="例：日程表、事業計画、財務諸表など">
-                                <div class="form-text">文脈を入力することで、より自然な翻訳が可能になります。</div>
+                                <div class="form-text">業界や文書種別を選択することで、専門用語の翻訳精度が向上します。</div>
                             </div>
 
                             <!-- 言語設定 -->
@@ -108,6 +132,27 @@
                                 </div>
                             </div>
 
+                            <!-- 翻訳品質設定 -->
+                            <div class="row mb-4">
+                                <div class="col-md-6">
+                                    <label for="formality" class="form-label">敬語レベル</label>
+                                    <select class="form-select" id="formality" name="formality">
+                                        <option value="default" selected>デフォルト</option>
+                                        <option value="more">フォーマル（敬語）</option>
+                                        <option value="less">カジュアル（親近感）</option>
+                                    </select>
+                                    <div class="form-text">翻訳先言語に応じて適切な敬語レベルが適用されます。</div>
+                                </div>
+                                <div class="col-md-6">
+                                    <label for="quality_mode" class="form-label">翻訳品質モード</label>
+                                    <select class="form-select" id="quality_mode" name="quality_mode">
+                                        <option value="balanced" selected>バランス（速度重視）</option>
+                                        <option value="quality">高品質（時間がかかります）</option>
+                                    </select>
+                                    <div class="form-text">高品質モードは処理時間が長くなりますが、より正確な翻訳を提供します。</div>
+                                </div>
+                            </div>
+
                             <!-- 送信ボタン -->
                             <div class="text-center">
                                 <button type="submit" class="btn btn-primary btn-lg" id="submit-btn">
@@ -127,12 +172,16 @@
                     <div class="card-body">
                         <ol>
                             <li>翻訳したいExcelファイル（.xlsx または .xls）を選択してください</li>
-                            <li>文脈を入力することで翻訳の精度が向上します</li>
+                            <li>文脈・業界を選択することで専門用語の翻訳精度が向上します</li>
+                            <li>敬語レベルと翻訳品質モードを選択してください</li>
                             <li>必要に応じて翻訳元・翻訳先言語を変更してください</li>
                             <li>「翻訳を開始」ボタンをクリックして翻訳を実行します</li>
                         </ol>
                         <div class="alert alert-info">
-                            <strong>注意:</strong> セルの結合やフォーマットは保持されます。大きなファイルは処理に時間がかかる場合があります。
+                            <strong>スマート翻訳機能:</strong> 数値、日付、URL、数式などは自動的に翻訳対象から除外されます。セルの結合やフォーマットは保持されます。
+                        </div>
+                        <div class="alert alert-warning">
+                            <strong>注意:</strong> 高品質モードは処理時間が長くなりますが、より正確な翻訳を提供します。大きなファイルは処理に時間がかかる場合があります。
                         </div>
                     </div>
                 </div>
@@ -210,6 +259,8 @@
             formData.append('source_lang', document.getElementById('source_lang').value);
             formData.append('target_lang', document.getElementById('target_lang').value);
             formData.append('context', document.getElementById('context').value);
+            formData.append('formality', document.getElementById('formality').value);
+            formData.append('quality_mode', document.getElementById('quality_mode').value);
             
             // fetchでファイルアップロード（タイムアウト設定）
             const controller = new AbortController();
