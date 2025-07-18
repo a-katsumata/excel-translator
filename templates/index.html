@@ -132,7 +132,7 @@
                                 </div>
                             </div>
 
-                            <!-- 翻訳品質設定 -->
+                            <!-- 翻訳設定 -->
                             <div class="row mb-4">
                                 <div class="col-md-6">
                                     <label for="formality" class="form-label">敬語レベル</label>
@@ -144,12 +144,10 @@
                                     <div class="form-text">翻訳先言語に応じて適切な敬語レベルが適用されます。</div>
                                 </div>
                                 <div class="col-md-6">
-                                    <label for="quality_mode" class="form-label">翻訳品質モード</label>
-                                    <select class="form-select" id="quality_mode" name="quality_mode">
-                                        <option value="balanced" selected>バランス（速度重視）</option>
-                                        <option value="quality">高品質（時間がかかります）</option>
-                                    </select>
-                                    <div class="form-text">高品質モードは処理時間が長くなりますが、より正確な翻訳を提供します。</div>
+                                    <div class="alert alert-info mb-0">
+                                        <strong><i class="bi bi-star-fill"></i> 高品質翻訳モード</strong><br>
+                                        <small>シート全体を解析し、DeepLの最高品質モデルで翻訳します。処理時間は長めですが、専門用語の一貫性と翻訳精度が大幅に向上します。</small>
+                                    </div>
                                 </div>
                             </div>
 
@@ -173,15 +171,15 @@
                         <ol>
                             <li>翻訳したいExcelファイル（.xlsx または .xls）を選択してください</li>
                             <li>文脈・業界を選択することで専門用語の翻訳精度が向上します</li>
-                            <li>敬語レベルと翻訳品質モードを選択してください</li>
+                            <li>敬語レベルを選択してください</li>
                             <li>必要に応じて翻訳元・翻訳先言語を変更してください</li>
                             <li>「翻訳を開始」ボタンをクリックして翻訳を実行します</li>
                         </ol>
-                        <div class="alert alert-info">
-                            <strong>スマート翻訳機能:</strong> 数値、日付、URL、数式などは自動的に翻訳対象から除外されます。セルの結合やフォーマットは保持されます。
+                        <div class="alert alert-success">
+                            <strong><i class="bi bi-lightning-charge-fill"></i> 高品質シート全体翻訳:</strong> 各シートを構造的に分析し、セル間の関係性を理解した上で翻訳します。専門用語の一貫性が保たれ、数値・日付・URL・数式は自動的に保護されます。
                         </div>
                         <div class="alert alert-warning">
-                            <strong>注意:</strong> 高品質モードは処理時間が長くなりますが、より正確な翻訳を提供します。大きなファイルは処理に時間がかかる場合があります。
+                            <strong>処理時間について:</strong> 高品質翻訳のため、通常より時間がかかります。大きなファイルは数分かかる場合がありますので、お待ちください。
                         </div>
                     </div>
                 </div>
@@ -260,7 +258,6 @@
             formData.append('target_lang', document.getElementById('target_lang').value);
             formData.append('context', document.getElementById('context').value);
             formData.append('formality', document.getElementById('formality').value);
-            formData.append('quality_mode', document.getElementById('quality_mode').value);
             
             // fetchでファイルアップロード（タイムアウト設定）
             const controller = new AbortController();

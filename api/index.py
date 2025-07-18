@@ -88,6 +88,126 @@ def generate_context_from_headers(sheet, cell_row, cell_col):
     
     return ' '.join(context_parts[:5])  # 最大5つの要素で文脈を作成
 
+def analyze_sheet_structure(sheet):
+    """シート構造を分析して翻訳単位を決定"""
+    # シートの全セルを取得
+    all_cells = []
+    for row in sheet.iter_rows():
+        for cell in row:
+            if cell.value is not None:
+                all_cells.append({
+                    'row': cell.row,
+                    'column': cell.column,
+                    'value': cell.value,
+                    'coordinate': cell.coordinate
+                })
+    
+    # ヘッダー行を特定（最初の数行でテキストが多い行）
+    header_rows = []
+    for row_num in range(1, min(6, sheet.max_row + 1)):
+        text_cells = 0
+        for col_num in range(1, sheet.max_column + 1):
+            cell = sheet.cell(row=row_num, column=col_num)
+            if cell.value and isinstance(cell.value, str) and len(cell.value.strip()) > 0:
+                text_cells += 1
+        if text_cells >= sheet.max_column * 0.5:  # 50%以上がテキスト
+            header_rows.append(row_num)
+    
+    # データ領域を特定
+    data_start_row = max(header_rows) + 1 if header_rows else 1
+    
+    return {
+        'header_rows': header_rows,
+        'data_start_row': data_start_row,
+        'total_cells': len(all_cells),
+        'max_row': sheet.max_row,
+        'max_column': sheet.max_column
+    }
+
+def create_sheet_context(sheet, structure):
+    """シート全体の文脈を作成"""
+    context_parts = []
+    
+    # シート名を文脈に追加
+    if sheet.title:
+        context_parts.append(f"シート名: {sheet.title}")
+    
+    # ヘッダー行から文脈を作成
+    for header_row in structure['header_rows']:
+        header_texts = []
+        for col_num in range(1, min(sheet.max_column + 1, 10)):  # 最大10列
+            cell = sheet.cell(row=header_row, column=col_num)
+            if cell.value and isinstance(cell.value, str):
+                header_texts.append(cell.value)
+        if header_texts:
+            context_parts.append(' | '.join(header_texts))
+    
+    return '. '.join(context_parts)
+
+def convert_sheet_to_structured_text(sheet, structure):
+    """シートを構造化されたテキストに変換"""
+    lines = []
+    
+    # ヘッダー行の処理
+    for header_row in structure['header_rows']:
+        header_cells = []
+        for col_num in range(1, sheet.max_column + 1):
+            cell = sheet.cell(row=header_row, column=col_num)
+            if cell.value is not None:
+                header_cells.append(str(cell.value))
+            else:
+                header_cells.append('')
+        lines.append('\t'.join(header_cells))
+    
+    # データ行の処理
+    for row_num in range(structure['data_start_row'], sheet.max_row + 1):
+        row_cells = []
+        has_content = False
+        for col_num in range(1, sheet.max_column + 1):
+            cell = sheet.cell(row=row_num, column=col_num)
+            if cell.value is not None:
+                if should_translate_cell(cell.value):
+                    row_cells.append(str(cell.value))
+                    has_content = True
+                else:
+                    row_cells.append(f"[PRESERVE]{cell.value}[/PRESERVE]")
+            else:
+                row_cells.append('')
+        
+        if has_content:
+            lines.append('\t'.join(row_cells))
+    
+    return '\n'.join(lines)
+
+def parse_translated_structured_text(translated_text, sheet, structure):
+    """翻訳されたテキストを解析してシートに適用"""
+    lines = translated_text.strip().split('\n')
+    
+    # ヘッダー行の処理
+    header_line_count = len(structure['header_rows'])
+    for i, header_row in enumerate(structure['header_rows']):
+        if i < len(lines):
+            cells = lines[i].split('\t')
+            for col_num, cell_value in enumerate(cells, 1):
+                if col_num <= sheet.max_column:
+                    cell = sheet.cell(row=header_row, column=col_num)
+                    if should_translate_cell(cell.value):
+                        cell.value = cell_value
+    
+    # データ行の処理
+    for i, row_num in enumerate(range(structure['data_start_row'], sheet.max_row + 1), header_line_count):
+        if i < len(lines):
+            cells = lines[i].split('\t')
+            for col_num, cell_value in enumerate(cells, 1):
+                if col_num <= sheet.max_column:
+                    cell = sheet.cell(row=row_num, column=col_num)
+                    if should_translate_cell(cell.value):
+                        # [PRESERVE]タグがある場合は元の値を保持
+                        if cell_value.startswith('[PRESERVE]') and cell_value.endswith('[/PRESERVE]'):
+                            continue
+                        else:
+                            cell.value = cell_value
+
 @app.route('/')
 def index():
     try:
@@ -117,7 +237,7 @@ def health():
         'files_in_parent_dir': os.listdir(parent_dir) if os.path.exists(parent_dir) else 'parent directory not found'
     })
 
-def translate_batch(texts, target_lang, source_lang, context, api_key, formality=None, quality_mode='balanced'):
+def translate_batch(texts, target_lang, source_lang, context, api_key, formality=None):
     """DeepL APIを使用して複数のテキストを一括翻訳"""
     if not texts:
         return []
@@ -150,9 +270,8 @@ def translate_batch(texts, target_lang, source_lang, context, api_key, formality
     if formality and formality != 'default':
         data['formality'] = formality
     
-    # 品質モードの設定
-    if quality_mode == 'quality':
-        data['model_type'] = 'quality_optimized'
+    # 常に高品質モードを使用
+    data['model_type'] = 'quality_optimized'
     
     response = requests.post(url, data=data)
     
@@ -190,62 +309,102 @@ def api_translate():
         target_lang = request.form.get('target_lang', 'EN-US')
         context = request.form.get('context', '')
         formality = request.form.get('formality', 'default')
-        quality_mode = request.form.get('quality_mode', 'balanced')
         
         # Excelファイルを読み込み
         wb = openpyxl.load_workbook(io.BytesIO(file.read()))
         
-        # 全シートの全セルを翻訳（バッチ処理）
+        # 全シートをシート全体翻訳で処理
         for sheet_name in wb.sheetnames:
             sheet = wb[sheet_name]
             
-            # 翻訳対象のセルを収集（インテリジェント分析）
-            cells_to_translate = []
-            texts_to_translate = []
-            cell_contexts = []
+            # シート構造を分析
+            structure = analyze_sheet_structure(sheet)
             
-            for row in sheet.iter_rows():
-                for cell in row:
-                    if should_translate_cell(cell.value):
-                        cells_to_translate.append(cell)
-                        texts_to_translate.append(cell.value)
-                        
-                        # 個別の文脈を生成（既存の文脈と組み合わせ）
-                        cell_context = generate_context_from_headers(sheet, cell.row, cell.column)
-                        if context and cell_context:
-                            combined_context = f"{context}. {cell_context}"
-                        else:
-                            combined_context = context or cell_context
-                        cell_contexts.append(combined_context)
+            # シート全体の文脈を作成
+            sheet_context = create_sheet_context(sheet, structure)
+            combined_context = f"{context}. {sheet_context}" if context else sheet_context
             
-            # バッチで翻訳（最大50個ずつ）
-            batch_size = 50
-            for i in range(0, len(texts_to_translate), batch_size):
-                batch_texts = texts_to_translate[i:i+batch_size]
-                batch_cells = cells_to_translate[i:i+batch_size]
-                batch_contexts = cell_contexts[i:i+batch_size]
+            # シートを構造化されたテキストに変換
+            structured_text = convert_sheet_to_structured_text(sheet, structure)
+            
+            # 構造化されたテキストのサイズをチェック
+            if len(structured_text) > 100000:  # 100KB以上の場合は分割
+                # 大きなシートの場合は行ごとに分割して処理
+                lines = structured_text.split('\n')
+                header_lines = lines[:len(structure['header_rows'])]
+                data_lines = lines[len(structure['header_rows']):]
                 
-                try:
-                    # バッチの代表的な文脈を使用（最初の非空の文脈）
-                    batch_context = next((ctx for ctx in batch_contexts if ctx), context)
+                # ヘッダー行を翻訳
+                if header_lines:
+                    header_text = '\n'.join(header_lines)
+                    try:
+                        translated_header = translate_batch(
+                            [header_text],
+                            target_lang,
+                            source_lang,
+                            combined_context,
+                            deepl_api_key,
+                            formality
+                        )[0]
+                        
+                        # ヘッダー行を解析してシートに適用
+                        header_structure = {
+                            'header_rows': structure['header_rows'],
+                            'data_start_row': structure['header_rows'][-1] if structure['header_rows'] else 1,
+                            'max_row': structure['header_rows'][-1] if structure['header_rows'] else 1,
+                            'max_column': structure['max_column']
+                        }
+                        parse_translated_structured_text(translated_header, sheet, header_structure)
+                        
+                    except Exception as e:
+                        print(f"Header translation error: {str(e)}")
+                
+                # データ行を小さなバッチに分けて翻訳
+                batch_size = 50
+                for i in range(0, len(data_lines), batch_size):
+                    batch_lines = data_lines[i:i+batch_size]
+                    batch_text = '\n'.join(batch_lines)
                     
-                    translated_batch = translate_batch(
-                        batch_texts,
+                    try:
+                        translated_batch = translate_batch(
+                            [batch_text],
+                            target_lang,
+                            source_lang,
+                            combined_context,
+                            deepl_api_key,
+                            formality
+                        )[0]
+                        
+                        # バッチ結果を解析してシートに適用
+                        batch_structure = {
+                            'header_rows': [],
+                            'data_start_row': structure['data_start_row'] + i,
+                            'max_row': min(structure['data_start_row'] + i + batch_size - 1, structure['max_row']),
+                            'max_column': structure['max_column']
+                        }
+                        parse_translated_structured_text(translated_batch, sheet, batch_structure)
+                        
+                    except Exception as e:
+                        print(f"Data batch translation error: {str(e)}")
+                        
+            else:
+                # 小さなシートの場合は全体を一度に翻訳
+                try:
+                    translated_text = translate_batch(
+                        [structured_text],
                         target_lang,
                         source_lang,
-                        batch_context,
+                        combined_context,
                         deepl_api_key,
-                        formality,
-                        quality_mode
-                    )
+                        formality
+                    )[0]
                     
-                    # 翻訳結果をセルに適用
-                    for j, translated_text in enumerate(translated_batch):
-                        batch_cells[j].value = translated_text
-                        
+                    # 翻訳されたテキストを解析してシートに適用
+                    parse_translated_structured_text(translated_text, sheet, structure)
+                    
                 except Exception as e:
-                    print(f"Translation error for batch: {str(e)}")
-                    # バッチエラーの場合は元のテキストを保持
+                    print(f"Sheet translation error: {str(e)}")
+                    # エラーの場合は従来のセル単位翻訳にフォールバック
                     pass
         
         # 翻訳されたファイルを一時ファイルに保存
